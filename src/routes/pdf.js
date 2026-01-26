@@ -507,13 +507,23 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
             pdfPath = filePath;
           }
         } else if (exhibit.type === 'url' && exhibit.url) {
-          // Convert URL to PDF
+          // Convert URL to PDF using api2pdf
           await jobStorage.addLog(jobId, `Converting URL: ${exhibit.label || exhibit.url.substring(0, 50)}...`);
-          const result = await pdfService.convertUrlToPdf(exhibit.url, tempDir, `url_${exhibit.id}.pdf`);
-          if (result.success) {
-            pdfPath = result.localPath;
+          const fileName = `url_${exhibit.id}.pdf`;
+          const result = await pdfService.convertUrlToPdfWithRetry(exhibit.url, fileName);
+
+          if (result.success && result.fileUrl) {
+            // Download the converted PDF to temp directory
+            const localPath = path.join(tempDir, fileName);
+            try {
+              await pdfService.downloadPdfWithRetry(result.fileUrl, localPath);
+              pdfPath = localPath;
+              await jobStorage.addLog(jobId, `Converted: ${exhibit.label || fileName}`);
+            } catch (downloadErr) {
+              await jobStorage.addLog(jobId, `Failed to download converted PDF: ${downloadErr.message}`);
+            }
           } else {
-            await jobStorage.addLog(jobId, `Failed to convert URL: ${result.error}`);
+            await jobStorage.addLog(jobId, `Failed to convert URL: ${result.error || 'Unknown error'}`);
           }
         }
 
@@ -550,7 +560,7 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
     let processedPdfs = [];
     if (enableCoverPages) {
       await jobStorage.addLog(jobId, 'Adding exhibit cover pages...');
-      processedPdfs = await exhibitService.processExhibits(collectedPdfs, numberingStyle, tempDir);
+      processedPdfs = await exhibitService.processExhibits(collectedPdfs, numberingStyle, tempDir, { caseName });
       await jobStorage.updateJob(jobId, { progress: 60 });
     } else {
       processedPdfs = collectedPdfs.map((pdf, idx) => ({

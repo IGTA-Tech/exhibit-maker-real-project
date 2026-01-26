@@ -81,6 +81,14 @@ async function ensureTablesExist() {
       delivery_result JSONB,
       error TEXT,
       logs JSONB DEFAULT '[]'::jsonb,
+      output_path TEXT,
+      download_url TEXT,
+      package_size BIGINT,
+      total_pages INTEGER,
+      total_exhibits INTEGER,
+      processed_exhibits INTEGER DEFAULT 0,
+      case_name TEXT,
+      status_message TEXT,
       created_at TIMESTAMPTZ DEFAULT now(),
       updated_at TIMESTAMPTZ DEFAULT now(),
       completed_at TIMESTAMPTZ
@@ -90,12 +98,36 @@ async function ensureTablesExist() {
     CREATE INDEX IF NOT EXISTS idx_pdf_jobs_created_at ON pdf_jobs(created_at);
   `;
 
+  // Add columns to existing table if they don't exist
+  const alterTableSQL = `
+    DO $$
+    BEGIN
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS output_path TEXT;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS download_url TEXT;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS package_size BIGINT;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS total_pages INTEGER;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS total_exhibits INTEGER;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS processed_exhibits INTEGER DEFAULT 0;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS case_name TEXT;
+      ALTER TABLE pdf_jobs ADD COLUMN IF NOT EXISTS status_message TEXT;
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END $$;
+  `;
+
   try {
-    const { error } = await supabase.rpc('exec_sql', { sql: createTableSQL });
-    if (error) {
-      // Table might already exist, which is fine
-      console.log('Table creation note:', error.message);
+    // Try to create table first
+    const { error: createError } = await supabase.rpc('exec_sql', { sql: createTableSQL });
+    if (createError) {
+      console.log('Table creation note:', createError.message);
     }
+
+    // Then try to add missing columns
+    const { error: alterError } = await supabase.rpc('exec_sql', { sql: alterTableSQL });
+    if (alterError) {
+      console.log('Column migration note:', alterError.message);
+    }
+
     return { success: true };
   } catch (error) {
     console.error('Error ensuring tables exist:', error.message);

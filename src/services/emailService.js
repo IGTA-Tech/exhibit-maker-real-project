@@ -7,51 +7,107 @@ const path = require('path');
 let transporter = null;
 
 /**
+ * Escape HTML to prevent XSS
+ */
+function escapeHtml(text) {
+  if (typeof text !== 'string') return text;
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+/**
+ * Get credentials from environment or file (same as googleDriveService)
+ */
+function getCredentials() {
+  if (process.env.GOOGLE_CREDENTIALS_BASE64) {
+    try {
+      const decoded = Buffer.from(process.env.GOOGLE_CREDENTIALS_BASE64, 'base64').toString('utf8');
+      return JSON.parse(decoded);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || './credentials.json';
+  if (!fs.existsSync(credentialsPath)) return null;
+
+  try {
+    return JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Get OAuth token from environment or file
+ */
+function getToken() {
+  if (process.env.GOOGLE_TOKEN_BASE64) {
+    try {
+      const decoded = Buffer.from(process.env.GOOGLE_TOKEN_BASE64, 'base64').toString('utf8');
+      return JSON.parse(decoded);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || './credentials.json';
+  const tokenPath = path.join(path.dirname(credentialsPath), 'token.json');
+  if (!fs.existsSync(tokenPath)) return null;
+
+  try {
+    return JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
  * Initialize email transporter
  * Supports Gmail API (OAuth2) or regular SMTP
  */
 async function initializeEmail() {
   if (transporter) return transporter;
 
-  // Try Gmail API first if Google credentials exist
-  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || './credentials.json';
-  const tokenPath = path.join(path.dirname(credentialsPath), 'token.json');
+  const credentials = getCredentials();
+  const token = getToken();
 
-  if (fs.existsSync(credentialsPath) && fs.existsSync(tokenPath)) {
+  // Try Gmail OAuth2 first
+  if (credentials && token && (credentials.installed || credentials.web)) {
     try {
-      const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
-      const token = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+      const clientConfig = credentials.installed || credentials.web;
 
-      // Check if it's OAuth credentials (not service account)
-      if (credentials.installed || credentials.web) {
-        const clientConfig = credentials.installed || credentials.web;
+      const oauth2Client = new google.auth.OAuth2(
+        clientConfig.client_id,
+        clientConfig.client_secret,
+        clientConfig.redirect_uris[0]
+      );
 
-        const oauth2Client = new google.auth.OAuth2(
-          clientConfig.client_id,
-          clientConfig.client_secret,
-          clientConfig.redirect_uris[0]
-        );
+      oauth2Client.setCredentials(token);
 
-        oauth2Client.setCredentials(token);
+      // Get fresh access token
+      const accessToken = await oauth2Client.getAccessToken();
 
-        // Get fresh access token
-        const accessToken = await oauth2Client.getAccessToken();
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          type: 'OAuth2',
+          user: process.env.EMAIL_USER || token.email || '',
+          clientId: clientConfig.client_id,
+          clientSecret: clientConfig.client_secret,
+          refreshToken: token.refresh_token,
+          accessToken: accessToken.token
+        }
+      });
 
-        transporter = nodemailer.createTransport({
-          service: 'gmail',
-          auth: {
-            type: 'OAuth2',
-            user: process.env.EMAIL_USER || token.email || '',
-            clientId: clientConfig.client_id,
-            clientSecret: clientConfig.client_secret,
-            refreshToken: token.refresh_token,
-            accessToken: accessToken.token
-          }
-        });
-
-        console.log('Email initialized with Gmail OAuth2');
-        return transporter;
-      }
+      console.log('Email initialized with Gmail OAuth2');
+      return transporter;
     } catch (error) {
       console.log('Gmail OAuth2 setup failed, falling back to SMTP:', error.message);
     }
@@ -79,6 +135,13 @@ async function initializeEmail() {
   transporter = nodemailer.createTransport(config);
   console.log('Email initialized with SMTP');
   return transporter;
+}
+
+/**
+ * Check if email is configured
+ */
+function isConfigured() {
+  return !!(process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) || !!(getCredentials() && getToken());
 }
 
 /**
@@ -124,10 +187,11 @@ async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipF
   // Get sender email
   let fromEmail = process.env.EMAIL_USER;
   if (!fromEmail) {
-    const tokenPath = './token.json';
-    if (fs.existsSync(tokenPath)) {
-      const token = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+    const token = getToken();
+    if (token) {
       fromEmail = token.email || 'noreply@example.com';
+    } else {
+      fromEmail = 'noreply@example.com';
     }
   }
 
@@ -160,12 +224,15 @@ async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipF
 }
 
 /**
- * Generate HTML email body
+ * Generate HTML email body with XSS protection
  */
 function generateEmailHtml(results, folderName) {
   const successCount = results.success.length;
   const failedCount = results.failed.length;
   const totalCount = results.total;
+
+  // Escape user-provided content
+  const safeFolderName = escapeHtml(folderName);
 
   let html = `
     <!DOCTYPE html>
@@ -185,13 +252,14 @@ function generateEmailHtml(results, folderName) {
         table { width: 100%; border-collapse: collapse; margin-top: 15px; }
         th, td { padding: 8px; text-align: left; border-bottom: 1px solid #e2e8f0; }
         th { background: #e2e8f0; }
+        .url-cell { word-break: break-all; max-width: 250px; }
       </style>
     </head>
     <body>
       <div class="container">
         <div class="header">
           <h1 style="margin: 0;">Your PDFs are Ready!</h1>
-          <p style="margin: 10px 0 0 0; opacity: 0.9;">${folderName}</p>
+          <p style="margin: 10px 0 0 0; opacity: 0.9;">${safeFolderName}</p>
         </div>
         <div class="content">
           <p>Your URL to PDF conversion is complete. Please find the attached ZIP file containing your PDFs.</p>
@@ -219,7 +287,10 @@ function generateEmailHtml(results, folderName) {
             <tr><th>#</th><th>URL</th><th>Error</th></tr>
     `;
     results.failed.forEach(item => {
-      html += `<tr><td>${item.index}</td><td style="word-break: break-all; max-width: 250px;">${item.url.substring(0, 50)}...</td><td>${item.error}</td></tr>`;
+      // Escape all user-provided content
+      const safeUrl = escapeHtml(item.url.substring(0, 50));
+      const safeError = escapeHtml(item.error);
+      html += `<tr><td>${item.index}</td><td class="url-cell">${safeUrl}...</td><td>${safeError}</td></tr>`;
     });
     html += `</table>`;
   }
@@ -227,7 +298,7 @@ function generateEmailHtml(results, folderName) {
   html += `
         </div>
         <div class="footer">
-          Generated by URL to PDF Tool
+          Generated by Exhibit Maker
         </div>
       </div>
     </body>
@@ -241,6 +312,13 @@ function generateEmailHtml(results, folderName) {
  * Send PDFs via email as ZIP attachment
  */
 async function sendPdfsViaEmail(pdfFiles, recipientEmail, folderName, results, indexContent) {
+  if (!isConfigured()) {
+    return {
+      success: false,
+      error: 'Email not configured. Set EMAIL_USER and EMAIL_PASSWORD, or configure Google OAuth.'
+    };
+  }
+
   const tempDir = path.join(__dirname, '../../temp');
 
   // Ensure temp dir exists
@@ -275,7 +353,7 @@ async function sendPdfsViaEmail(pdfFiles, recipientEmail, folderName, results, i
     console.log(`Sending email to ${recipientEmail}...`);
     const emailResult = await sendEmailWithZip(
       recipientEmail,
-      `Your PDFs are Ready: ${folderName}`,
+      `Your PDFs are Ready: ${escapeHtml(folderName)}`,
       htmlBody,
       zipPath,
       zipFileName
@@ -299,8 +377,10 @@ async function sendPdfsViaEmail(pdfFiles, recipientEmail, folderName, results, i
 
 module.exports = {
   initializeEmail,
+  isConfigured,
   createZipFromPdfs,
   sendEmailWithZip,
   sendPdfsViaEmail,
-  generateEmailHtml
+  generateEmailHtml,
+  escapeHtml
 };

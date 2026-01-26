@@ -5,19 +5,77 @@ const path = require('path');
 let driveClient = null;
 
 /**
+ * Get credentials from environment or file
+ * Supports base64 encoded credentials for production deployments
+ */
+function getCredentials() {
+  // First try base64 encoded credentials (for Railway/cloud deployments)
+  if (process.env.GOOGLE_CREDENTIALS_BASE64) {
+    try {
+      const decoded = Buffer.from(process.env.GOOGLE_CREDENTIALS_BASE64, 'base64').toString('utf8');
+      return JSON.parse(decoded);
+    } catch (error) {
+      console.error('Failed to decode GOOGLE_CREDENTIALS_BASE64:', error.message);
+    }
+  }
+
+  // Fall back to file-based credentials
+  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || './credentials.json';
+
+  if (!fs.existsSync(credentialsPath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  } catch (error) {
+    console.error('Failed to read credentials file:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get OAuth token from environment or file
+ */
+function getToken() {
+  // Try base64 encoded token (for Railway/cloud deployments)
+  if (process.env.GOOGLE_TOKEN_BASE64) {
+    try {
+      const decoded = Buffer.from(process.env.GOOGLE_TOKEN_BASE64, 'base64').toString('utf8');
+      return JSON.parse(decoded);
+    } catch (error) {
+      console.error('Failed to decode GOOGLE_TOKEN_BASE64:', error.message);
+    }
+  }
+
+  // Fall back to file-based token
+  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || './credentials.json';
+  const tokenPath = path.join(path.dirname(credentialsPath), 'token.json');
+
+  if (!fs.existsSync(tokenPath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+  } catch (error) {
+    console.error('Failed to read token file:', error.message);
+    return null;
+  }
+}
+
+/**
  * Initialize Google Drive client
  * Supports both Service Account and OAuth2 credentials
  */
 async function initializeDrive() {
   if (driveClient) return driveClient;
 
-  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || './credentials.json';
+  const credentials = getCredentials();
 
-  if (!fs.existsSync(credentialsPath)) {
-    throw new Error(`Google credentials file not found at: ${credentialsPath}`);
+  if (!credentials) {
+    throw new Error('Google credentials not found. Set GOOGLE_CREDENTIALS_BASE64 or GOOGLE_CREDENTIALS_PATH.');
   }
-
-  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
 
   let auth;
 
@@ -25,18 +83,17 @@ async function initializeDrive() {
   if (credentials.type === 'service_account') {
     // Service Account credentials
     auth = new google.auth.GoogleAuth({
-      keyFile: credentialsPath,
+      credentials: credentials,
       scopes: ['https://www.googleapis.com/auth/drive.file']
     });
   } else if (credentials.installed || credentials.web) {
     // OAuth2 credentials - need token
-    const tokenPath = path.join(path.dirname(credentialsPath), 'token.json');
+    const token = getToken();
 
-    if (!fs.existsSync(tokenPath)) {
-      throw new Error('OAuth token not found. Run the setup script first to authorize.');
+    if (!token) {
+      throw new Error('OAuth token not found. Run the setup script first to authorize, or set GOOGLE_TOKEN_BASE64.');
     }
 
-    const token = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
     const clientConfig = credentials.installed || credentials.web;
 
     const oauth2Client = new google.auth.OAuth2(
@@ -53,6 +110,13 @@ async function initializeDrive() {
 
   driveClient = google.drive({ version: 'v3', auth });
   return driveClient;
+}
+
+/**
+ * Check if Google Drive is configured
+ */
+function isConfigured() {
+  return !!(getCredentials());
 }
 
 /**
@@ -141,6 +205,13 @@ async function shareWithEmail(fileId, email, role = 'reader') {
  * Upload multiple PDFs to a new shared folder
  */
 async function uploadPdfsToSharedFolder(pdfFiles, folderName, recipientEmail) {
+  if (!isConfigured()) {
+    return {
+      success: false,
+      error: 'Google Drive not configured. Set GOOGLE_CREDENTIALS_BASE64 or GOOGLE_CREDENTIALS_PATH.'
+    };
+  }
+
   try {
     // Create folder
     const folder = await createFolder(folderName);
@@ -221,6 +292,7 @@ async function uploadIndexFile(indexContent, folderId, fileName = 'INDEX.txt') {
 
 module.exports = {
   initializeDrive,
+  isConfigured,
   createFolder,
   uploadFile,
   shareWithEmail,

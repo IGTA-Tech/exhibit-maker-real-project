@@ -5,11 +5,45 @@ const path = require('path');
 
 const API_KEY = process.env.API2PDF_API_KEY;
 
+// Common errors that indicate retry might help
+const RETRYABLE_ERRORS = [
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'Request timeout',
+  'socket hang up',
+  'Internal Server Error',
+  '500',
+  '502',
+  '503',
+  '504',
+];
+
+/**
+ * Sleep for specified milliseconds
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Check if error is retryable
+ */
+function isRetryableError(error) {
+  const errorStr = String(error).toLowerCase();
+  return RETRYABLE_ERRORS.some(e => errorStr.includes(e.toLowerCase()));
+}
+
 /**
  * Convert a single URL to PDF using api2pdf
  */
 async function convertUrlToPdf(url, fileName, options = {}) {
   return new Promise((resolve, reject) => {
+    if (!API_KEY) {
+      resolve({ success: false, error: 'API2PDF_API_KEY not configured', fileName });
+      return;
+    }
+
     const postData = JSON.stringify({
       url: url,
       inline: false,
@@ -43,10 +77,12 @@ async function convertUrlToPdf(url, fileName, options = {}) {
           if (response.FileUrl) {
             resolve({ success: true, fileUrl: response.FileUrl, fileName });
           } else {
+            const errorMsg = response.Error || response.error || response.message || 'Unknown API error';
             resolve({
               success: false,
-              error: response.Error || response.error || 'Unknown API error',
-              fileName
+              error: errorMsg,
+              fileName,
+              retryable: isRetryableError(errorMsg)
             });
           }
         } catch (e) {
@@ -56,17 +92,53 @@ async function convertUrlToPdf(url, fileName, options = {}) {
     });
 
     req.on('error', (e) => {
-      resolve({ success: false, error: e.message, fileName });
+      resolve({
+        success: false,
+        error: e.message,
+        fileName,
+        retryable: isRetryableError(e.message)
+      });
     });
 
     req.setTimeout(60000, () => {
       req.destroy();
-      resolve({ success: false, error: 'Request timeout', fileName });
+      resolve({ success: false, error: 'Request timeout', fileName, retryable: true });
     });
 
     req.write(postData);
     req.end();
   });
+}
+
+/**
+ * Convert URL with retry logic
+ */
+async function convertUrlToPdfWithRetry(url, fileName, options = {}, maxRetries = 3) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const result = await convertUrlToPdf(url, fileName, options);
+
+    if (result.success) {
+      return result;
+    }
+
+    lastError = result.error;
+
+    // Don't retry if not a retryable error
+    if (!result.retryable) {
+      return result;
+    }
+
+    // Don't sleep after the last attempt
+    if (attempt < maxRetries) {
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Exponential backoff
+      console.log(`Retry ${attempt}/${maxRetries} for ${fileName} after ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+
+  return { success: false, error: lastError || 'Max retries exceeded', fileName };
 }
 
 /**
@@ -120,12 +192,65 @@ async function downloadPdf(pdfUrl, localPath) {
 }
 
 /**
+ * Download PDF with retry logic
+ */
+async function downloadPdfWithRetry(pdfUrl, localPath, maxRetries = 3) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await downloadPdf(pdfUrl, localPath);
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetryableError(error.message)) {
+        throw error;
+      }
+
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+        console.log(`Download retry ${attempt}/${maxRetries} after ${delay}ms`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError || new Error('Max retries exceeded');
+}
+
+/**
+ * Check if PDF is encrypted/password protected
+ */
+async function isPdfEncrypted(filePath) {
+  try {
+    const buffer = fs.readFileSync(filePath);
+    const content = buffer.toString('latin1');
+
+    // Check for encryption dictionary
+    if (content.includes('/Encrypt')) {
+      return true;
+    }
+
+    // Check for password protected marker
+    if (content.includes('/Encrypt ') || content.includes('/Encrypt\n') || content.includes('/Encrypt\r')) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error('Error checking PDF encryption:', error.message);
+    return false;
+  }
+}
+
+/**
  * Process multiple URLs with rate limiting
  */
 async function processUrls(urls, outputDir, onProgress) {
   const results = {
     success: [],
     failed: [],
+    skipped: [],
     total: urls.length
   };
 
@@ -152,24 +277,47 @@ async function processUrls(urls, outputDir, onProgress) {
       const fileName = item.fileName || `PDF_${String(index).padStart(3, '0')}.pdf`;
 
       try {
-        // Convert URL to PDF
-        const result = await convertUrlToPdf(item.url, fileName);
+        // Convert URL to PDF with retry
+        const result = await convertUrlToPdfWithRetry(item.url, fileName);
 
         if (result.success) {
-          // Download the PDF
+          // Download the PDF with retry
           const localPath = path.join(outputDir, fileName);
-          await downloadPdf(result.fileUrl, localPath);
+          await downloadPdfWithRetry(result.fileUrl, localPath);
 
-          results.success.push({
-            index,
-            url: item.url,
-            fileName,
-            localPath,
-            label: item.label || ''
-          });
+          // Check if PDF is encrypted
+          if (await isPdfEncrypted(localPath)) {
+            // Skip encrypted PDF but keep the file
+            results.skipped.push({
+              index,
+              url: item.url,
+              fileName,
+              localPath,
+              reason: 'PDF is encrypted/password protected',
+              label: item.label || ''
+            });
 
-          if (onProgress) {
-            onProgress({ type: 'success', index, fileName, url: item.url });
+            if (onProgress) {
+              onProgress({
+                type: 'skipped',
+                index,
+                fileName,
+                url: item.url,
+                reason: 'Encrypted PDF'
+              });
+            }
+          } else {
+            results.success.push({
+              index,
+              url: item.url,
+              fileName,
+              localPath,
+              label: item.label || ''
+            });
+
+            if (onProgress) {
+              onProgress({ type: 'success', index, fileName, url: item.url });
+            }
           }
         } else {
           results.failed.push({
@@ -222,11 +370,13 @@ function parseUrls(input, format = 'text') {
       if (Array.isArray(data)) {
         data.forEach((item, idx) => {
           if (typeof item === 'string') {
-            urls.push({ url: item, fileName: `PDF_${String(idx + 1).padStart(3, '0')}.pdf` });
-          } else if (item.url) {
+            if (isValidUrl(item)) {
+              urls.push({ url: item, fileName: `PDF_${String(idx + 1).padStart(3, '0')}.pdf` });
+            }
+          } else if (item.url && isValidUrl(item.url)) {
             urls.push({
               url: item.url,
-              fileName: item.fileName || item.name || `PDF_${String(idx + 1).padStart(3, '0')}.pdf`,
+              fileName: sanitizeFileName(item.fileName || item.name) || `PDF_${String(idx + 1).padStart(3, '0')}.pdf`,
               label: item.label || item.description || ''
             });
           }
@@ -244,11 +394,11 @@ function parseUrls(input, format = 'text') {
       const parts = line.split(',').map(p => p.trim());
       const url = parts[0];
 
-      if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+      if (url && isValidUrl(url)) {
         urls.push({
           url: url,
           label: parts[1] || '',
-          fileName: parts[2] || `PDF_${String(idx + 1).padStart(3, '0')}.pdf`
+          fileName: sanitizeFileName(parts[2]) || `PDF_${String(idx + 1).padStart(3, '0')}.pdf`
         });
       }
     });
@@ -257,9 +407,52 @@ function parseUrls(input, format = 'text') {
   return urls;
 }
 
+/**
+ * Validate URL format
+ */
+function isValidUrl(string) {
+  try {
+    const url = new URL(string);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sanitize filename to prevent path traversal and invalid characters
+ */
+function sanitizeFileName(fileName) {
+  if (!fileName) return null;
+
+  // Remove path traversal attempts
+  let sanitized = fileName.replace(/\.\./g, '').replace(/[/\\]/g, '');
+
+  // Remove invalid characters
+  sanitized = sanitized.replace(/[<>:"|?*]/g, '_');
+
+  // Limit length
+  if (sanitized.length > 200) {
+    const ext = path.extname(sanitized);
+    sanitized = sanitized.substring(0, 196) + ext;
+  }
+
+  // Ensure .pdf extension
+  if (!sanitized.toLowerCase().endsWith('.pdf')) {
+    sanitized += '.pdf';
+  }
+
+  return sanitized;
+}
+
 module.exports = {
   convertUrlToPdf,
+  convertUrlToPdfWithRetry,
   downloadPdf,
+  downloadPdfWithRetry,
   processUrls,
-  parseUrls
+  parseUrls,
+  isPdfEncrypted,
+  isValidUrl,
+  sanitizeFileName
 };

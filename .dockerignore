@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Uploads (generated at runtime)
+uploads/*
+!uploads/.gitkeep
+
+# Credentials (should be in env vars for Railway)
+credentials.json
+token.json
+*.pem
+*.key
+
+# Development files
+README.md
+.editorconfig
+*.test.js
+*.spec.js
+__tests__
+coverage
+
+# Logs
+logs
+*.log

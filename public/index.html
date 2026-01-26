@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>URL to PDF Converter</title>
+  <title>Exhibit Maker - URL to PDF Converter</title>
   <link rel="stylesheet" href="/css/styles.css">
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>URL to PDF Converter</h1>
-      <p>Convert multiple URLs to PDFs and deliver via Google Drive or Email</p>
+      <h1>Exhibit Maker</h1>
+      <p>Convert URLs to PDFs with exhibit cover pages and deliver via Google Drive or Email</p>
     </header>
 
     <main>
@@ -18,7 +18,7 @@
         <!-- Step 1: Input URLs -->
         <section class="card">
           <h2><span class="step">1</span> Add URLs</h2>
-          <p class="hint">Paste URLs (one per line) or upload a file (TXT, CSV, or JSON)</p>
+          <p class="hint">Paste URLs (one per line) or upload a file (TXT, CSV, JSON, or ZIP)</p>
 
           <div class="tabs">
             <button type="button" class="tab active" data-tab="paste">Paste URLs</button>
@@ -43,10 +43,10 @@ https://example.com/page2, Label for page 2"
 
           <div class="tab-content" id="upload-content">
             <div class="file-drop" id="fileDrop">
-              <input type="file" id="urlFile" name="urlFile" accept=".txt,.csv,.json" hidden>
+              <input type="file" id="urlFile" name="urlFile" accept=".txt,.csv,.json,.zip" hidden>
               <div class="file-drop-icon">📄</div>
               <p>Drag & drop a file here or <button type="button" class="link-btn" onclick="document.getElementById('urlFile').click()">browse</button></p>
-              <span class="hint">Accepts .txt, .csv, or .json files</span>
+              <span class="hint">Accepts .txt, .csv, .json, or .zip files</span>
             </div>
             <div id="fileInfo" class="file-info hidden"></div>
           </div>
@@ -68,12 +68,13 @@ https://example.com/page2, Label for page 2"
           </div>
 
           <div class="form-group">
-            <label for="folderName">Folder/Project Name (optional)</label>
+            <label for="folderName">Project/Case Name (optional)</label>
             <input
               type="text"
               id="folderName"
               name="folderName"
-              placeholder="My PDF Collection"
+              placeholder="My Exhibit Package"
+              maxlength="100"
             >
           </div>
 
@@ -110,6 +111,9 @@ https://example.com/page2, Label for page 2"
           <button type="submit" id="convertBtn" class="btn btn-primary btn-large">
             Start Conversion
           </button>
+          <p class="hint" style="margin-top: 10px; text-align: center;">
+            Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit
+          </p>
         </section>
       </form>
 
@@ -153,7 +157,7 @@ https://example.com/page2, Label for page 2"
     </main>
 
     <footer>
-      <p>Powered by api2pdf | Google Drive API | Nodemailer</p>
+      <p>Exhibit Maker v2.0 | Powered by api2pdf, Google Drive API, and Supabase</p>
     </footer>
   </div>
 

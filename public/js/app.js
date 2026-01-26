@@ -1,17 +1,43 @@
-// DOM Elements
-const convertForm = document.getElementById('convertForm');
-const urlTextarea = document.getElementById('urlText');
-const urlFileInput = document.getElementById('urlFile');
-const fileDrop = document.getElementById('fileDrop');
-const fileInfo = document.getElementById('fileInfo');
-const urlCount = document.getElementById('urlCount');
-const convertBtn = document.getElementById('convertBtn');
-const progressSection = document.getElementById('progressSection');
-const resultSection = document.getElementById('resultSection');
-
 /**
- * Escape HTML to prevent XSS
+ * Visa Exhibit Maker - Frontend Application
+ * Full-featured exhibit package generator with:
+ * - PDF uploads
+ * - URL to PDF conversion
+ * - Drag-and-drop reordering
+ * - Exhibit numbering (Letters, Numbers, Roman)
+ * - AI classification
+ * - Table of Contents
+ * - Cover pages
  */
+
+// ============================================
+// State Management
+// ============================================
+const state = {
+  currentStage: 1,
+  exhibits: [], // Array of exhibit objects
+  orderHistory: [], // For undo functionality
+  sortableInstance: null,
+  packageResult: null
+};
+
+// Exhibit object structure:
+// {
+//   id: string,
+//   type: 'pdf' | 'url',
+//   file: File | null,
+//   url: string | null,
+//   label: string,
+//   filename: string,
+//   size: number,
+//   classification: string | null,
+//   confidence: number | null
+// }
+
+// ============================================
+// Utility Functions
+// ============================================
+
 function escapeHtml(text) {
   if (typeof text !== 'string') return String(text);
   const div = document.createElement('div');
@@ -19,469 +45,838 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-/**
- * Validate email format
- */
-function isValidEmail(email) {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
+function generateId() {
+  return 'ex_' + Math.random().toString(36).substr(2, 9);
 }
 
-/**
- * Validate URL format
- */
-function isValidUrl(string) {
-  try {
-    const url = new URL(string);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function getExhibitNumber(index, style) {
+  const num = index + 1;
+  switch (style) {
+    case 'numbers':
+      return String(num);
+    case 'roman':
+      return toRoman(num);
+    case 'letters':
+    default:
+      return toLetters(num);
   }
 }
 
-// Tab switching
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+function toLetters(num) {
+  let result = '';
+  while (num > 0) {
+    num--;
+    result = String.fromCharCode(65 + (num % 26)) + result;
+    num = Math.floor(num / 26);
+  }
+  return result;
+}
 
-    tab.classList.add('active');
-    document.getElementById(`${tab.dataset.tab}-content`).classList.add('active');
+function toRoman(num) {
+  const romanNumerals = [
+    ['M', 1000], ['CM', 900], ['D', 500], ['CD', 400],
+    ['C', 100], ['XC', 90], ['L', 50], ['XL', 40],
+    ['X', 10], ['IX', 9], ['V', 5], ['IV', 4], ['I', 1]
+  ];
+  let result = '';
+  for (const [letter, value] of romanNumerals) {
+    while (num >= value) {
+      result += letter;
+      num -= value;
+    }
+  }
+  return result;
+}
+
+function showNotification(message, type = 'info') {
+  const container = document.getElementById('notifications');
+  const notification = document.createElement('div');
+  notification.className = `notification ${type}`;
+  notification.textContent = message;
+  container.appendChild(notification);
+
+  setTimeout(() => {
+    notification.style.opacity = '0';
+    setTimeout(() => notification.remove(), 300);
+  }, 5000);
+}
+
+// ============================================
+// Stage Navigation
+// ============================================
+
+function goToStage(stageNum) {
+  // Validate transition
+  if (stageNum > 1 && state.exhibits.length === 0) {
+    showNotification('Please upload at least one document first', 'error');
+    return;
+  }
+
+  // Update state
+  state.currentStage = stageNum;
+
+  // Update navigation UI
+  document.querySelectorAll('.stage').forEach((stage, index) => {
+    stage.classList.remove('active', 'completed');
+    if (index + 1 < stageNum) {
+      stage.classList.add('completed');
+    } else if (index + 1 === stageNum) {
+      stage.classList.add('active');
+    }
+  });
+
+  // Show/hide stage content
+  document.querySelectorAll('.stage-content').forEach(content => {
+    content.classList.remove('active');
+  });
+  document.getElementById(`stage-${stageNum}`).classList.add('active');
+
+  // Stage-specific initialization
+  if (stageNum === 2) {
+    renderReviewList();
+  } else if (stageNum === 3) {
+    renderReorderList();
+  } else if (stageNum === 4) {
+    updateGenerateSummary();
+  }
+
+  // Scroll to top
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// Make stage navigation clickable
+document.querySelectorAll('.stage').forEach(stage => {
+  stage.addEventListener('click', () => {
+    const targetStage = parseInt(stage.dataset.stage);
+    if (targetStage <= state.currentStage || state.exhibits.length > 0) {
+      goToStage(targetStage);
+    }
   });
 });
 
-// URL counting
-urlTextarea.addEventListener('input', () => {
-  const urls = countUrls(urlTextarea.value);
-  urlCount.textContent = urls;
+// ============================================
+// Stage 1: Upload
+// ============================================
+
+// Upload tab switching
+document.querySelectorAll('.upload-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.upload-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.upload-content').forEach(c => c.classList.remove('active'));
+
+    tab.classList.add('active');
+    document.getElementById(`upload-${tab.dataset.uploadTab}`).classList.add('active');
+  });
+});
+
+// PDF file upload
+const pdfDropZone = document.getElementById('pdfDropZone');
+const pdfFilesInput = document.getElementById('pdfFiles');
+
+pdfDropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  pdfDropZone.classList.add('dragover');
+});
+
+pdfDropZone.addEventListener('dragleave', () => {
+  pdfDropZone.classList.remove('dragover');
+});
+
+pdfDropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  pdfDropZone.classList.remove('dragover');
+  handlePdfFiles(e.dataTransfer.files);
+});
+
+pdfFilesInput.addEventListener('change', (e) => {
+  handlePdfFiles(e.target.files);
+});
+
+function handlePdfFiles(files) {
+  for (const file of files) {
+    if (file.type !== 'application/pdf') {
+      showNotification(`Skipping ${file.name} - not a PDF file`, 'error');
+      continue;
+    }
+
+    const exhibit = {
+      id: generateId(),
+      type: 'pdf',
+      file: file,
+      url: null,
+      label: file.name.replace(/\.pdf$/i, ''),
+      filename: file.name,
+      size: file.size,
+      classification: null,
+      confidence: null
+    };
+
+    state.exhibits.push(exhibit);
+  }
+
+  updateFilesList();
+  updateContinueButton();
+  showNotification(`Added ${files.length} PDF(s)`, 'success');
+}
+
+// URL input
+const urlInput = document.getElementById('urlInput');
+
+urlInput.addEventListener('input', () => {
+  const count = countUrls(urlInput.value);
+  document.getElementById('urlCount').textContent = `${count} URLs detected`;
 });
 
 function countUrls(text) {
   const lines = text.split(/[\r\n]+/).filter(line => {
     const url = line.split(',')[0].trim();
-    return isValidUrl(url);
+    try {
+      new URL(url);
+      return true;
+    } catch {
+      return false;
+    }
   });
   return lines.length;
 }
 
-// File drag and drop
-fileDrop.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  fileDrop.classList.add('drag-over');
-});
-
-fileDrop.addEventListener('dragleave', () => {
-  fileDrop.classList.remove('drag-over');
-});
-
-fileDrop.addEventListener('drop', (e) => {
-  e.preventDefault();
-  fileDrop.classList.remove('drag-over');
-
-  const file = e.dataTransfer.files[0];
-  if (file) {
-    handleFileSelect(file);
-  }
-});
-
-urlFileInput.addEventListener('change', (e) => {
-  if (e.target.files[0]) {
-    handleFileSelect(e.target.files[0]);
-  }
-});
-
-function handleFileSelect(file) {
-  const ext = file.name.split('.').pop().toLowerCase();
-  if (!['txt', 'csv', 'json', 'zip'].includes(ext)) {
-    showNotification('Please upload a .txt, .csv, .json, or .zip file', 'error');
+function addUrlsToExhibits() {
+  const text = urlInput.value.trim();
+  if (!text) {
+    showNotification('Please enter some URLs first', 'error');
     return;
   }
 
-  // Sanitize filename for display
-  const safeName = escapeHtml(file.name);
+  const lines = text.split(/[\r\n]+/).filter(line => line.trim());
+  let added = 0;
 
-  fileInfo.innerHTML = `
-    <span style="font-size: 1.5rem;">📄</span>
-    <div>
-      <strong>${safeName}</strong>
-      <div style="font-size: 0.875rem; color: var(--text-light);">
-        ${(file.size / 1024).toFixed(1)} KB
-      </div>
-    </div>
-    <button type="button" class="btn btn-secondary" onclick="clearFile()" style="margin-left: auto; padding: 6px 12px;">Remove</button>
-  `;
-  fileInfo.classList.remove('hidden');
+  for (const line of lines) {
+    const parts = line.split(',').map(p => p.trim());
+    const url = parts[0];
+    const label = parts[1] || extractLabelFromUrl(url);
 
-  // Read file to count URLs (skip for ZIP files)
-  if (ext === 'zip') {
-    fileInfo.querySelector('div').innerHTML += `<div style="color: var(--primary); font-weight: 500;">ZIP file selected</div>`;
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const content = e.target.result;
-    let count = 0;
-
-    if (ext === 'json') {
-      try {
-        const data = JSON.parse(content);
-        count = Array.isArray(data) ? data.length : 0;
-      } catch (err) {
-        count = 0;
-      }
-    } else {
-      count = countUrls(content);
+    try {
+      new URL(url);
+    } catch {
+      continue;
     }
 
-    fileInfo.querySelector('div').innerHTML += `<div style="color: var(--primary); font-weight: 500;">${count} URLs detected</div>`;
-  };
-  reader.readAsText(file);
-}
+    const exhibit = {
+      id: generateId(),
+      type: 'url',
+      file: null,
+      url: url,
+      label: label,
+      filename: `${label}.pdf`,
+      size: 0,
+      classification: null,
+      confidence: null
+    };
 
-function clearFile() {
-  urlFileInput.value = '';
-  fileInfo.classList.add('hidden');
-}
-
-// Show notification
-function showNotification(message, type = 'info') {
-  // Remove existing notification
-  const existing = document.querySelector('.notification');
-  if (existing) {
-    existing.remove();
+    state.exhibits.push(exhibit);
+    added++;
   }
 
-  const notification = document.createElement('div');
-  notification.className = `notification notification-${type}`;
-  notification.textContent = message;
-  notification.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    padding: 12px 20px;
-    border-radius: 8px;
-    background: ${type === 'error' ? '#dc2626' : type === 'success' ? '#16a34a' : '#2563eb'};
-    color: white;
-    font-weight: 500;
-    z-index: 1000;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    animation: slideIn 0.3s ease;
-  `;
-
-  document.body.appendChild(notification);
-
-  setTimeout(() => {
-    notification.remove();
-  }, 5000);
-}
-
-// Form submission
-convertForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-
-  const formData = new FormData();
-  const deliveryMethod = document.querySelector('input[name="deliveryMethod"]:checked').value;
-  const recipientEmail = document.getElementById('recipientEmail').value.trim();
-  const folderName = document.getElementById('folderName').value.trim();
-
-  // Validate email
-  if (!recipientEmail) {
-    showNotification('Please enter a recipient email', 'error');
-    document.getElementById('recipientEmail').focus();
-    return;
-  }
-
-  if (!isValidEmail(recipientEmail)) {
-    showNotification('Please enter a valid email address', 'error');
-    document.getElementById('recipientEmail').focus();
-    return;
-  }
-
-  // Check if we have URLs
-  const urlText = urlTextarea.value.trim();
-  const hasFile = urlFileInput.files.length > 0;
-
-  if (!urlText && !hasFile) {
-    showNotification('Please enter URLs or upload a file', 'error');
-    return;
-  }
-
-  // Validate URLs in text input
-  if (urlText && !hasFile) {
-    const urlLines = urlText.split(/[\r\n]+/).filter(line => line.trim());
-    const invalidUrls = urlLines.filter(line => {
-      const url = line.split(',')[0].trim();
-      return url && !isValidUrl(url);
-    });
-
-    if (invalidUrls.length > 0 && invalidUrls.length === urlLines.length) {
-      showNotification('No valid URLs found. URLs must start with http:// or https://', 'error');
-      return;
-    }
-  }
-
-  // Prepare request
-  if (hasFile) {
-    formData.append('urlFile', urlFileInput.files[0]);
+  if (added > 0) {
+    urlInput.value = '';
+    document.getElementById('urlCount').textContent = '0 URLs detected';
+    updateFilesList();
+    updateContinueButton();
+    showNotification(`Added ${added} URL(s) for conversion`, 'success');
   } else {
-    formData.append('urlText', urlText);
+    showNotification('No valid URLs found', 'error');
+  }
+}
+
+function extractLabelFromUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const path = urlObj.pathname;
+    const lastPart = path.split('/').filter(p => p).pop() || urlObj.hostname;
+    return lastPart.replace(/[-_]/g, ' ').replace(/\.[^.]+$/, '');
+  } catch {
+    return 'Document';
+  }
+}
+
+// Google Drive placeholder
+function connectGoogleDrive() {
+  showNotification('Google Drive integration coming soon', 'info');
+}
+
+// Update files list UI
+function updateFilesList() {
+  const container = document.getElementById('filesContainer');
+  const fileCount = document.getElementById('fileCount');
+
+  fileCount.textContent = `(${state.exhibits.length})`;
+
+  if (state.exhibits.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>No documents uploaded yet</p></div>';
+    return;
   }
 
-  formData.append('deliveryMethod', deliveryMethod);
-  formData.append('recipientEmail', recipientEmail);
-  if (folderName) {
-    formData.append('folderName', folderName);
+  container.innerHTML = '';
+
+  state.exhibits.forEach(exhibit => {
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.innerHTML = `
+      <span class="file-icon">${exhibit.type === 'pdf' ? '📄' : '🔗'}</span>
+      <div class="file-info">
+        <div class="file-name">${escapeHtml(exhibit.label)}</div>
+        <div class="file-meta">${exhibit.type === 'pdf' ? formatFileSize(exhibit.size) : escapeHtml(exhibit.url)}</div>
+      </div>
+      <button type="button" class="file-remove" onclick="removeExhibit('${exhibit.id}')">×</button>
+    `;
+    container.appendChild(item);
+  });
+}
+
+function removeExhibit(id) {
+  state.exhibits = state.exhibits.filter(e => e.id !== id);
+  updateFilesList();
+  updateContinueButton();
+}
+
+function updateContinueButton() {
+  const btn = document.getElementById('toReviewBtn');
+  btn.disabled = state.exhibits.length === 0;
+}
+
+// ============================================
+// Stage 2: Review & Label
+// ============================================
+
+function renderReviewList() {
+  const container = document.getElementById('reviewList');
+  const visaType = document.getElementById('visaType').value;
+  const numberingStyle = document.getElementById('numberingStyle').value;
+
+  container.innerHTML = '';
+
+  state.exhibits.forEach((exhibit, index) => {
+    const exhibitNum = getExhibitNumber(index, numberingStyle);
+    const item = document.createElement('div');
+    item.className = 'review-item';
+    item.dataset.id = exhibit.id;
+
+    item.innerHTML = `
+      <div class="review-number">${escapeHtml(exhibitNum)}</div>
+      <div class="review-content">
+        <div class="review-filename">${exhibit.type === 'pdf' ? escapeHtml(exhibit.filename) : escapeHtml(exhibit.url)}</div>
+        <input type="text" class="review-label-input" value="${escapeHtml(exhibit.label)}"
+               onchange="updateExhibitLabel('${exhibit.id}', this.value)"
+               placeholder="Enter exhibit label...">
+        ${visaType ? `
+        <div class="review-classification">
+          <select onchange="updateExhibitClassification('${exhibit.id}', this.value)">
+            <option value="">Select criteria...</option>
+            ${getVisaCriteriaOptions(visaType, exhibit.classification)}
+          </select>
+          ${exhibit.confidence ? `
+            <span class="confidence-badge ${getConfidenceClass(exhibit.confidence)}">
+              ${Math.round(exhibit.confidence * 100)}% confident
+            </span>
+          ` : ''}
+        </div>
+        ` : ''}
+      </div>
+      <div class="review-actions-cell">
+        <button type="button" class="btn btn-small" onclick="removeExhibit('${exhibit.id}'); renderReviewList();">Remove</button>
+      </div>
+    `;
+
+    container.appendChild(item);
+  });
+}
+
+function getVisaCriteriaOptions(visaType, selected) {
+  const criteria = {
+    'O-1A': [
+      'Awards - Nationally/Internationally recognized prizes',
+      'Membership - Associations requiring outstanding achievements',
+      'Published Material - About the beneficiary in major media',
+      'Judging - Judging the work of others',
+      'Original Contributions - Of major significance',
+      'Scholarly Articles - In professional journals',
+      'Employment - In critical/essential capacity',
+      'High Salary - Commanding high remuneration'
+    ],
+    'O-1B': [
+      'Lead/Starring Role - In distinguished productions',
+      'Critical Reviews - Recognition for achievements',
+      'Lead Role for Organizations - With distinguished reputation',
+      'Record of Commercial Success - High salary/box office',
+      'Recognition - From organizations, critics, experts',
+      'Original Contributions - To the field'
+    ],
+    'EB-1A': [
+      'Awards - Lesser nationally/internationally recognized prizes',
+      'Membership - Associations requiring outstanding achievements',
+      'Published Material - About the beneficiary',
+      'Judging - Judging the work of others',
+      'Original Contributions - Of major significance',
+      'Scholarly Articles - In professional journals',
+      'Exhibitions - Display of work',
+      'Leading Role - In distinguished organizations',
+      'High Salary - Compared to others in field',
+      'Commercial Success - In performing arts'
+    ],
+    'P-1A': [
+      'International Recognition - As an athlete',
+      'Team Participation - In international competition',
+      'National/International Rankings',
+      'Awards - Significant awards in sport',
+      'Recognition - From sports organizations',
+      'Media Coverage - Of athletic achievements'
+    ]
+  };
+
+  const opts = criteria[visaType] || [];
+  return opts.map(opt =>
+    `<option value="${escapeHtml(opt)}" ${selected === opt ? 'selected' : ''}>${escapeHtml(opt)}</option>`
+  ).join('');
+}
+
+function getConfidenceClass(confidence) {
+  if (confidence >= 0.8) return 'confidence-high';
+  if (confidence >= 0.5) return 'confidence-medium';
+  return 'confidence-low';
+}
+
+function updateExhibitLabel(id, label) {
+  const exhibit = state.exhibits.find(e => e.id === id);
+  if (exhibit) {
+    exhibit.label = label;
+  }
+}
+
+function updateExhibitClassification(id, classification) {
+  const exhibit = state.exhibits.find(e => e.id === id);
+  if (exhibit) {
+    exhibit.classification = classification;
+  }
+}
+
+function autoNameFromFilename() {
+  state.exhibits.forEach(exhibit => {
+    if (exhibit.type === 'pdf') {
+      exhibit.label = exhibit.filename
+        .replace(/\.pdf$/i, '')
+        .replace(/[-_]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+  });
+  renderReviewList();
+  showNotification('Labels updated from filenames', 'success');
+}
+
+async function runAiClassification() {
+  const visaType = document.getElementById('visaType').value;
+  if (!visaType) {
+    showNotification('Please select a visa type first', 'error');
+    return;
   }
 
-  // Show progress section
-  convertBtn.disabled = true;
-  convertBtn.textContent = 'Starting...';
+  showNotification('AI classification starting...', 'info');
+
+  // For now, show a placeholder - actual AI integration would call the API
+  state.exhibits.forEach(exhibit => {
+    // Simulate AI classification
+    exhibit.classification = null;
+    exhibit.confidence = null;
+  });
+
+  renderReviewList();
+  showNotification('AI classification requires API integration', 'info');
+}
+
+// ============================================
+// Stage 3: Reorder
+// ============================================
+
+function renderReorderList() {
+  const container = document.getElementById('reorderList');
+  const numberingStyle = document.getElementById('numberingStyle').value;
+
+  container.innerHTML = '';
+
+  state.exhibits.forEach((exhibit, index) => {
+    const exhibitNum = getExhibitNumber(index, numberingStyle);
+    const item = document.createElement('div');
+    item.className = 'reorder-item';
+    item.dataset.id = exhibit.id;
+
+    item.innerHTML = `
+      <span class="drag-handle">☰</span>
+      <span class="reorder-number">Exhibit ${escapeHtml(exhibitNum)}</span>
+      <span class="reorder-label">${escapeHtml(exhibit.label)}</span>
+      <span class="reorder-source">${exhibit.type === 'pdf' ? '📄 PDF' : '🔗 URL'}</span>
+    `;
+
+    container.appendChild(item);
+  });
+
+  // Initialize SortableJS
+  if (state.sortableInstance) {
+    state.sortableInstance.destroy();
+  }
+
+  state.sortableInstance = new Sortable(container, {
+    animation: 150,
+    handle: '.drag-handle',
+    ghostClass: 'sortable-ghost',
+    dragClass: 'sortable-drag',
+    onEnd: function(evt) {
+      // Save history for undo
+      state.orderHistory.push([...state.exhibits]);
+      if (state.orderHistory.length > 10) {
+        state.orderHistory.shift();
+      }
+      document.getElementById('undoBtn').disabled = false;
+
+      // Reorder exhibits array
+      const movedItem = state.exhibits.splice(evt.oldIndex, 1)[0];
+      state.exhibits.splice(evt.newIndex, 0, movedItem);
+
+      // Re-render to update numbers
+      renderReorderList();
+    }
+  });
+}
+
+function sortAlphabetically() {
+  state.orderHistory.push([...state.exhibits]);
+  state.exhibits.sort((a, b) => a.label.localeCompare(b.label));
+  renderReorderList();
+  document.getElementById('undoBtn').disabled = false;
+}
+
+function sortByType() {
+  state.orderHistory.push([...state.exhibits]);
+  state.exhibits.sort((a, b) => {
+    if (a.classification && b.classification) {
+      return a.classification.localeCompare(b.classification);
+    }
+    return a.type.localeCompare(b.type);
+  });
+  renderReorderList();
+  document.getElementById('undoBtn').disabled = false;
+}
+
+function reverseOrder() {
+  state.orderHistory.push([...state.exhibits]);
+  state.exhibits.reverse();
+  renderReorderList();
+  document.getElementById('undoBtn').disabled = false;
+}
+
+function undoReorder() {
+  if (state.orderHistory.length === 0) return;
+  state.exhibits = state.orderHistory.pop();
+  renderReorderList();
+  if (state.orderHistory.length === 0) {
+    document.getElementById('undoBtn').disabled = true;
+  }
+}
+
+// ============================================
+// Stage 4: Generate
+// ============================================
+
+function updateGenerateSummary() {
+  const numberingStyle = document.getElementById('numberingStyle').value;
+  const visaType = document.getElementById('visaType').value;
+  const deliveryMethod = document.getElementById('deliveryMethod').value;
+
+  document.getElementById('summaryCount').textContent = state.exhibits.length;
+  document.getElementById('summaryVisaType').textContent = visaType || 'Not selected';
+  document.getElementById('summaryNumbering').textContent =
+    numberingStyle === 'letters' ? 'Letters (A, B, C...)' :
+    numberingStyle === 'numbers' ? 'Numbers (1, 2, 3...)' :
+    'Roman (I, II, III...)';
+  document.getElementById('summaryDelivery').textContent =
+    deliveryMethod === 'download' ? 'Download' :
+    deliveryMethod === 'drive' ? 'Google Drive' : 'Email';
+
+  // Render preview
+  const preview = document.getElementById('exhibitPreview');
+  preview.innerHTML = '';
+
+  state.exhibits.forEach((exhibit, index) => {
+    const exhibitNum = getExhibitNumber(index, numberingStyle);
+    const item = document.createElement('div');
+    item.className = 'preview-item';
+    item.innerHTML = `
+      <span class="preview-number">Exhibit ${escapeHtml(exhibitNum)}</span>
+      <span class="preview-label">${escapeHtml(exhibit.label)}</span>
+    `;
+    preview.appendChild(item);
+  });
+}
+
+async function generatePackage() {
+  const generateBtn = document.getElementById('generateBtn');
+  const progressSection = document.getElementById('generateProgress');
+
+  generateBtn.disabled = true;
   progressSection.classList.remove('hidden');
-  resultSection.classList.add('hidden');
-
-  // Scroll to progress section
-  progressSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   try {
-    // Start conversion
-    const response = await fetch('/api/pdf/convert', {
+    // Prepare form data
+    const formData = new FormData();
+
+    // Add configuration
+    formData.append('config', JSON.stringify({
+      visaType: document.getElementById('visaType').value,
+      numberingStyle: document.getElementById('numberingStyle').value,
+      beneficiaryName: document.getElementById('beneficiaryName').value,
+      petitionerName: document.getElementById('petitionerName').value,
+      caseName: document.getElementById('caseName').value,
+      enableCompression: document.getElementById('enableCompression').checked,
+      enableToc: document.getElementById('enableToc').checked,
+      enableCoverPages: document.getElementById('enableCoverPages').checked,
+      deliveryMethod: document.getElementById('deliveryMethod').value,
+      recipientEmail: document.getElementById('recipientEmail').value
+    }));
+
+    // Add exhibits metadata
+    const exhibitsData = state.exhibits.map((exhibit, index) => ({
+      id: exhibit.id,
+      type: exhibit.type,
+      url: exhibit.url,
+      label: exhibit.label,
+      filename: exhibit.filename,
+      classification: exhibit.classification,
+      order: index
+    }));
+    formData.append('exhibits', JSON.stringify(exhibitsData));
+
+    // Add PDF files
+    state.exhibits.forEach(exhibit => {
+      if (exhibit.type === 'pdf' && exhibit.file) {
+        formData.append('files', exhibit.file, exhibit.id + '.pdf');
+      }
+    });
+
+    // Send to API
+    updateProgress(5, 'Uploading files...');
+
+    const response = await fetch('/api/pdf/generate', {
       method: 'POST',
       body: formData
     });
 
-    const result = await response.json();
-
     if (!response.ok) {
-      const errorMsg = result.details
-        ? result.details.join(', ')
-        : (result.error || 'Conversion failed');
-      throw new Error(errorMsg);
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to start generation');
     }
 
+    const result = await response.json();
+
     // Poll for status
-    pollJobStatus(result.jobId);
+    await pollGenerationStatus(result.jobId);
 
   } catch (error) {
-    showError(error.message);
-    convertBtn.disabled = false;
-    convertBtn.textContent = 'Start Conversion';
+    showNotification(error.message, 'error');
+    generateBtn.disabled = false;
+    progressSection.classList.add('hidden');
   }
-});
+}
 
-// Poll job status
-async function pollJobStatus(jobId) {
-  const pollInterval = 2000; // 2 seconds
-  const maxAttempts = 300; // 10 minutes max
+async function pollGenerationStatus(jobId) {
+  const maxAttempts = 300; // 10 minutes
   let attempts = 0;
 
   const poll = async () => {
     try {
       const response = await fetch(`/api/pdf/status/${jobId}`);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error('Job not found. It may have expired.');
-        }
-        throw new Error('Failed to check job status');
-      }
+      if (!response.ok) throw new Error('Failed to check status');
 
       const job = await response.json();
 
-      updateProgress(job);
+      updateProgress(job.progress, job.statusMessage || 'Processing...');
+      addProgressLog(job.logs);
 
       if (job.status === 'completed') {
-        showSuccess(job);
+        state.packageResult = job;
+        goToStage(5);
+        showComplete(job);
       } else if (job.status === 'failed') {
-        showError(job.error || 'Conversion failed');
+        throw new Error(job.error || 'Generation failed');
       } else if (attempts < maxAttempts) {
         attempts++;
-        setTimeout(poll, pollInterval);
+        setTimeout(poll, 2000);
       } else {
-        showError('Conversion timed out. Please try again.');
+        throw new Error('Generation timed out');
       }
     } catch (error) {
-      if (error.message.includes('NetworkError') || error.message.includes('Failed to fetch')) {
-        // Network error - retry a few times
-        if (attempts < 3) {
-          attempts++;
-          setTimeout(poll, pollInterval * 2);
-          return;
-        }
-        showError('Network error. Please check your connection and try again.');
-      } else {
-        showError(error.message);
-      }
+      showNotification(error.message, 'error');
+      document.getElementById('generateBtn').disabled = false;
+      document.getElementById('generateProgress').classList.add('hidden');
     }
   };
 
   poll();
 }
 
-// Update progress UI with XSS protection
-function updateProgress(job) {
-  document.getElementById('progressFill').style.width = `${job.progress}%`;
-  document.getElementById('progressPercent').textContent = `${job.progress}%`;
-
-  const statusMap = {
-    processing: 'Converting URLs to PDFs...',
-    uploading: 'Uploading to Google Drive...',
-    sending: 'Sending email...',
-    completed: 'Complete!',
-    failed: 'Failed'
-  };
-  document.getElementById('progressStatus').textContent = statusMap[job.status] || job.status;
-
-  document.getElementById('statTotal').textContent = job.totalUrls || 0;
-  document.getElementById('statSuccess').textContent = job.successCount || 0;
-  document.getElementById('statFailed').textContent = job.failedCount || 0;
-
-  // Update log with XSS protection
-  const logContent = document.getElementById('logContent');
-  logContent.innerHTML = '';
-
-  if (job.logs && Array.isArray(job.logs)) {
-    job.logs.forEach(log => {
-      const entry = document.createElement('div');
-      entry.className = 'log-entry';
-
-      const timeSpan = document.createElement('span');
-      timeSpan.className = 'log-time';
-      timeSpan.textContent = `[${new Date(log.time).toLocaleTimeString()}]`;
-
-      const msgSpan = document.createElement('span');
-      msgSpan.textContent = ' ' + log.message; // Safe - textContent escapes HTML
-
-      entry.appendChild(timeSpan);
-      entry.appendChild(msgSpan);
-      logContent.appendChild(entry);
-    });
-  }
-
-  logContent.scrollTop = logContent.scrollHeight;
+function updateProgress(percent, status) {
+  document.getElementById('progressFill').style.width = `${percent}%`;
+  document.getElementById('progressPercent').textContent = `${percent}%`;
+  document.getElementById('progressStatus').textContent = status;
 }
 
-// Show success result with XSS protection
-function showSuccess(job) {
-  convertBtn.disabled = false;
-  convertBtn.textContent = 'Start Conversion';
+function addProgressLog(logs) {
+  if (!logs || !Array.isArray(logs)) return;
 
-  resultSection.classList.remove('hidden');
+  const container = document.getElementById('progressLog');
+  container.innerHTML = '';
 
-  const resultContent = document.getElementById('resultContent');
-  resultContent.innerHTML = '';
+  logs.forEach(log => {
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${log.type || ''}`;
+    entry.textContent = `[${new Date(log.time).toLocaleTimeString()}] ${log.message}`;
+    container.appendChild(entry);
+  });
 
-  const container = document.createElement('div');
-  container.className = 'result-success';
+  container.scrollTop = container.scrollHeight;
+}
 
-  const icon = document.createElement('div');
-  icon.className = 'result-icon';
-  icon.textContent = '✅';
+// ============================================
+// Stage 5: Complete
+// ============================================
 
-  const title = document.createElement('h2');
-  title.textContent = 'Conversion Complete!';
+function showComplete(job) {
+  document.getElementById('completeExhibits').textContent = state.exhibits.length;
+  document.getElementById('completePages').textContent = job.totalPages || '?';
+  document.getElementById('completeSize').textContent = formatFileSize(job.packageSize || 0);
 
-  const stats = document.createElement('p');
-  stats.style.cssText = 'color: var(--text-light); margin: 10px 0;';
-  stats.textContent = `Successfully converted ${job.successCount || 0} of ${job.totalUrls || 0} URLs`;
+  const deliveryResult = document.getElementById('deliveryResult');
+  const deliveryMethod = document.getElementById('deliveryMethod').value;
 
-  container.appendChild(icon);
-  container.appendChild(title);
-  container.appendChild(stats);
+  if (deliveryMethod === 'download') {
+    deliveryResult.innerHTML = `
+      <p><strong>Your package is ready for download!</strong></p>
+      <p>Click the button below to download your exhibit package.</p>
+    `;
+  } else if (deliveryMethod === 'drive' && job.driveLink) {
+    deliveryResult.innerHTML = `
+      <p><strong>Uploaded to Google Drive!</strong></p>
+      <p>Your exhibit package has been shared to ${escapeHtml(job.recipientEmail)}</p>
+      <a href="${escapeHtml(job.driveLink)}" target="_blank" class="btn btn-primary" style="margin-top: 10px;">
+        Open in Google Drive
+      </a>
+    `;
+  } else if (deliveryMethod === 'email') {
+    deliveryResult.innerHTML = `
+      <p><strong>Email Sent!</strong></p>
+      <p>Your exhibit package has been emailed to ${escapeHtml(job.recipientEmail)}</p>
+      <p style="color: var(--gray-500);">Check your inbox (and spam folder)</p>
+    `;
+  }
 
-  if (job.deliveryResult && job.deliveryResult.method === 'Google Drive') {
-    const msg = document.createElement('p');
-    msg.style.margin = '20px 0';
-    msg.innerHTML = `Your PDFs have been shared to <strong>${escapeHtml(job.recipientEmail)}</strong>`;
-
-    const link = document.createElement('a');
-    link.href = job.deliveryResult.shareLink;
-    link.target = '_blank';
-    link.className = 'result-link';
-    link.textContent = 'Open Google Drive Folder';
-
-    container.appendChild(msg);
-    container.appendChild(link);
+  // Update download button
+  const downloadBtn = document.getElementById('downloadBtn');
+  if (job.downloadUrl) {
+    downloadBtn.onclick = () => window.open(job.downloadUrl, '_blank');
+    downloadBtn.style.display = 'inline-flex';
   } else {
-    const msg = document.createElement('p');
-    msg.style.margin = '20px 0';
-    msg.innerHTML = `An email with your PDFs has been sent to <strong>${escapeHtml(job.recipientEmail)}</strong>`;
-
-    const hint = document.createElement('div');
-    hint.style.color = 'var(--text-light)';
-    hint.textContent = 'Check your inbox (and spam folder)';
-
-    container.appendChild(msg);
-    container.appendChild(hint);
+    downloadBtn.style.display = 'none';
   }
-
-  resultContent.appendChild(container);
-
-  // Scroll to results
-  resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// Show error with XSS protection
-function showError(message) {
-  convertBtn.disabled = false;
-  convertBtn.textContent = 'Start Conversion';
-
-  resultSection.classList.remove('hidden');
-
-  const resultContent = document.getElementById('resultContent');
-  resultContent.innerHTML = '';
-
-  const container = document.createElement('div');
-  container.className = 'result-error';
-
-  const icon = document.createElement('div');
-  icon.className = 'result-icon';
-  icon.textContent = '❌';
-
-  const title = document.createElement('h2');
-  title.textContent = 'Something went wrong';
-
-  const errorMsg = document.createElement('p');
-  errorMsg.style.cssText = 'color: var(--error); margin: 10px 0;';
-  errorMsg.textContent = message; // Safe - textContent escapes HTML
-
-  container.appendChild(icon);
-  container.appendChild(title);
-  container.appendChild(errorMsg);
-
-  resultContent.appendChild(container);
-
-  // Scroll to results
-  resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+function downloadPackage() {
+  if (state.packageResult && state.packageResult.downloadUrl) {
+    window.open(state.packageResult.downloadUrl, '_blank');
+  }
 }
 
-// Reset form
-function resetForm() {
-  convertForm.reset();
-  urlCount.textContent = '0';
-  clearFile();
-  progressSection.classList.add('hidden');
-  resultSection.classList.add('hidden');
+function startNewCase() {
+  // Reset state
+  state.exhibits = [];
+  state.orderHistory = [];
+  state.packageResult = null;
+  state.currentStage = 1;
 
-  // Reset progress
-  document.getElementById('progressFill').style.width = '0%';
-  document.getElementById('progressPercent').textContent = '0%';
-  document.getElementById('progressStatus').textContent = 'Initializing...';
-  document.getElementById('logContent').innerHTML = '';
-  document.getElementById('statTotal').textContent = '0';
-  document.getElementById('statSuccess').textContent = '0';
-  document.getElementById('statFailed').textContent = '0';
+  // Reset form
+  document.getElementById('visaType').value = '';
+  document.getElementById('numberingStyle').value = 'letters';
+  document.getElementById('beneficiaryName').value = '';
+  document.getElementById('petitionerName').value = '';
+  document.getElementById('caseName').value = '';
+  document.getElementById('deliveryMethod').value = 'download';
+  document.getElementById('recipientEmail').value = '';
+  document.getElementById('urlInput').value = '';
 
-  // Scroll to top
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  // Reset UI
+  updateFilesList();
+  document.getElementById('generateProgress').classList.add('hidden');
+  document.getElementById('generateBtn').disabled = false;
+
+  // Go to stage 1
+  goToStage(1);
+  showNotification('Ready for new case', 'info');
 }
 
-// Add keyboard shortcut for form submission
+// ============================================
+// Sidebar Events
+// ============================================
+
+// Show/hide email field based on delivery method
+document.getElementById('deliveryMethod').addEventListener('change', (e) => {
+  const emailGroup = document.getElementById('emailGroup');
+  emailGroup.style.display = e.target.value === 'email' || e.target.value === 'drive' ? 'block' : 'none';
+});
+
+// Update review list when visa type changes
+document.getElementById('visaType').addEventListener('change', () => {
+  if (state.currentStage === 2) {
+    renderReviewList();
+  }
+});
+
+// Update numbering when style changes
+document.getElementById('numberingStyle').addEventListener('change', () => {
+  if (state.currentStage === 2) {
+    renderReviewList();
+  } else if (state.currentStage === 3) {
+    renderReorderList();
+  } else if (state.currentStage === 4) {
+    updateGenerateSummary();
+  }
+});
+
+// ============================================
+// Keyboard Shortcuts
+// ============================================
+
 document.addEventListener('keydown', (e) => {
-  // Ctrl/Cmd + Enter to submit
+  // Ctrl+Enter to continue to next stage
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-    if (!convertBtn.disabled) {
-      convertForm.dispatchEvent(new Event('submit'));
+    if (state.currentStage < 5 && state.exhibits.length > 0) {
+      goToStage(state.currentStage + 1);
     }
   }
+
+  // Ctrl+Z to undo reorder
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && state.currentStage === 3) {
+    undoReorder();
+  }
+});
+
+// ============================================
+// Initialize
+// ============================================
+
+document.addEventListener('DOMContentLoaded', () => {
+  updateFilesList();
+  updateContinueButton();
 });

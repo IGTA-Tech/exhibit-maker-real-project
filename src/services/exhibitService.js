@@ -151,25 +151,78 @@ async function addCoverPageToPdf(pdfPath, exhibitNumber, label = '', options = {
 }
 
 /**
+ * Get exhibit number in the specified style
+ */
+function getExhibitNumber(index, style) {
+  const num = index + 1;
+  switch (style) {
+    case 'numbers':
+      return String(num);
+    case 'roman':
+      return toRoman(num);
+    case 'letters':
+    default:
+      return toLetters(num);
+  }
+}
+
+function toLetters(num) {
+  let result = '';
+  while (num > 0) {
+    num--;
+    result = String.fromCharCode(65 + (num % 26)) + result;
+    num = Math.floor(num / 26);
+  }
+  return result;
+}
+
+function toRoman(num) {
+  const romanNumerals = [
+    ['M', 1000], ['CM', 900], ['D', 500], ['CD', 400],
+    ['C', 100], ['XC', 90], ['L', 50], ['XL', 40],
+    ['X', 10], ['IX', 9], ['V', 5], ['IV', 4], ['I', 1]
+  ];
+  let result = '';
+  for (const [letter, value] of romanNumerals) {
+    while (num >= value) {
+      result += letter;
+      num -= value;
+    }
+  }
+  return result;
+}
+
+/**
  * Process multiple PDFs and add exhibit cover pages
- * @param {Array} pdfFiles - Array of {localPath, fileName, label} objects
+ * @param {Array} pdfFiles - Array of {path, label, id, order} objects
+ * @param {string} numberingStyle - 'letters', 'numbers', or 'roman'
  * @param {string} outputDir - Directory to save processed PDFs
  * @param {Object} options - Additional options including caseName
  * @returns {Promise<Array>} - Array of processed file info
  */
-async function processExhibits(pdfFiles, outputDir, options = {}) {
+async function processExhibits(pdfFiles, numberingStyle = 'letters', outputDir, options = {}) {
   const results = [];
 
   for (let i = 0; i < pdfFiles.length; i++) {
     const pdf = pdfFiles[i];
-    const exhibitNumber = i + 1;
-    const outputFileName = `Exhibit_${String(exhibitNumber).padStart(3, '0')}_${pdf.fileName}`;
+    const exhibitNum = getExhibitNumber(i, numberingStyle);
+    const outputFileName = `Exhibit_${exhibitNum}_${path.basename(pdf.path)}`;
     const outputPath = path.join(outputDir, outputFileName);
 
     try {
+      // Read original PDF to get page count
+      const originalBytes = fs.readFileSync(pdf.path);
+      let pageCount = 1;
+      try {
+        const doc = await PDFDocument.load(originalBytes, { ignoreEncryption: true });
+        pageCount = doc.getPageCount();
+      } catch (e) {
+        // Ignore
+      }
+
       const processedPdf = await addCoverPageToPdf(
-        pdf.localPath,
-        exhibitNumber,
+        pdf.path,
+        exhibitNum,
         pdf.label || '',
         options
       );
@@ -177,19 +230,20 @@ async function processExhibits(pdfFiles, outputDir, options = {}) {
       fs.writeFileSync(outputPath, processedPdf);
 
       results.push({
+        ...pdf,
         success: true,
-        exhibitNumber,
-        originalFileName: pdf.fileName,
-        outputFileName,
-        outputPath,
-        label: pdf.label || '',
+        exhibitNumber: exhibitNum,
+        processedPath: outputPath,
+        pageCount: pageCount + 1, // +1 for cover page
       });
     } catch (error) {
       results.push({
+        ...pdf,
         success: false,
-        exhibitNumber,
-        originalFileName: pdf.fileName,
+        exhibitNumber: exhibitNum,
         error: error.message,
+        processedPath: pdf.path, // Fall back to original
+        pageCount: 1
       });
     }
   }

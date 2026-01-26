@@ -12,6 +12,7 @@ const emailService = require('../services/emailService');
 const jobStorage = require('../services/jobStorageService');
 const exhibitService = require('../services/exhibitService');
 const tocGenerator = require('../services/tocGenerator');
+const aiClassificationService = require('../services/aiClassificationService');
 
 // Configure multer for PDF uploads (exhibit generation)
 const pdfUpload = multer({
@@ -739,6 +740,122 @@ router.get('/download/:jobId', async (req, res) => {
   } catch (error) {
     console.error('Download error:', error);
     res.status(500).json({ error: 'Failed to download package' });
+  }
+});
+
+// ============================================
+// AI Classification Endpoints
+// ============================================
+
+/**
+ * Get available visa types and their criteria
+ * GET /api/pdf/visa-types
+ */
+router.get('/visa-types', (req, res) => {
+  const visaTypes = aiClassificationService.getAvailableVisaTypes();
+  res.json({ visaTypes });
+});
+
+/**
+ * Get criteria for a specific visa type
+ * GET /api/pdf/visa-types/:type/criteria
+ */
+router.get('/visa-types/:type/criteria', (req, res) => {
+  const criteria = aiClassificationService.getCriteriaForVisaType(req.params.type);
+  if (!criteria) {
+    return res.status(404).json({ error: 'Visa type not found' });
+  }
+  res.json(criteria);
+});
+
+/**
+ * Classify uploaded PDFs
+ * POST /api/pdf/classify
+ */
+router.post('/classify', pdfUpload.array('files', 50), async (req, res) => {
+  try {
+    const { visaType } = req.body;
+
+    if (!visaType) {
+      return res.status(400).json({ error: 'visaType is required' });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    // Parse labels if provided
+    let labels = {};
+    if (req.body.labels) {
+      try {
+        labels = JSON.parse(req.body.labels);
+      } catch (e) {
+        // Ignore parse error
+      }
+    }
+
+    // Prepare documents for classification
+    const documents = req.files.map((file, idx) => ({
+      id: file.filename,
+      path: file.path,
+      label: labels[file.originalname] || file.originalname.replace(/\.pdf$/i, ''),
+    }));
+
+    // Classify documents
+    const results = await aiClassificationService.classifyDocuments(documents, visaType);
+
+    // Analyze for missing criteria
+    const analysis = await aiClassificationService.analyzeMissingCriteria(results, visaType);
+
+    // Clean up uploaded files
+    for (const file of req.files) {
+      try {
+        fs.unlinkSync(file.path);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+
+    res.json({
+      success: true,
+      classifications: results,
+      analysis,
+    });
+
+  } catch (error) {
+    console.error('Classification error:', error);
+    res.status(500).json({ error: 'Classification failed: ' + error.message });
+  }
+});
+
+/**
+ * Suggest a name for a PDF based on its content
+ * POST /api/pdf/suggest-name
+ */
+router.post('/suggest-name', pdfUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const suggestedName = await aiClassificationService.suggestDocumentName(req.file.path);
+
+    // Clean up
+    try {
+      fs.unlinkSync(req.file.path);
+    } catch (e) {
+      // Ignore
+    }
+
+    if (suggestedName) {
+      res.json({ success: true, suggestedName });
+    } else {
+      res.json({ success: false, error: 'Could not suggest name' });
+    }
+
+  } catch (error) {
+    console.error('Suggest name error:', error);
+    res.status(500).json({ error: 'Failed to suggest name' });
   }
 });
 

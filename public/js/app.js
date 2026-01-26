@@ -486,17 +486,89 @@ async function runAiClassification() {
     return;
   }
 
-  showNotification('AI classification starting...', 'info');
+  // Only classify PDF exhibits (URLs would need to be converted first)
+  const pdfExhibits = state.exhibits.filter(e => e.type === 'pdf' && e.file);
+  if (pdfExhibits.length === 0) {
+    showNotification('No uploaded PDF files to classify', 'error');
+    return;
+  }
 
-  // For now, show a placeholder - actual AI integration would call the API
-  state.exhibits.forEach(exhibit => {
-    // Simulate AI classification
-    exhibit.classification = null;
-    exhibit.confidence = null;
-  });
+  const aiBtn = document.getElementById('aiClassifyBtn');
+  aiBtn.disabled = true;
+  aiBtn.innerHTML = '<span>⏳</span> Classifying...';
 
-  renderReviewList();
-  showNotification('AI classification requires API integration', 'info');
+  showNotification(`Analyzing ${pdfExhibits.length} documents with AI...`, 'info');
+
+  try {
+    // Prepare form data with PDFs and labels
+    const formData = new FormData();
+    formData.append('visaType', visaType);
+
+    const labels = {};
+    pdfExhibits.forEach(exhibit => {
+      formData.append('files', exhibit.file, exhibit.filename);
+      labels[exhibit.filename] = exhibit.label;
+    });
+    formData.append('labels', JSON.stringify(labels));
+
+    // Call classification API
+    const response = await fetch('/api/pdf/classify', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Classification failed');
+    }
+
+    const result = await response.json();
+
+    // Update exhibits with classification results
+    if (result.classifications) {
+      for (const classification of result.classifications) {
+        // Find exhibit by filename match
+        const exhibit = pdfExhibits.find(e =>
+          e.filename === classification.originalLabel ||
+          e.label === classification.originalLabel
+        );
+
+        if (exhibit && classification.success) {
+          exhibit.classification = classification.criterion_name || null;
+          exhibit.confidence = classification.confidence || null;
+
+          // Update label if AI suggested a better one
+          if (classification.suggested_label && classification.suggested_label !== exhibit.label) {
+            exhibit.aiSuggestedLabel = classification.suggested_label;
+          }
+        }
+      }
+    }
+
+    // Show analysis results
+    if (result.analysis) {
+      const { criteriaAnalysis, recommendation } = result.analysis;
+      const strongCount = criteriaAnalysis.strong?.length || 0;
+      const weakCount = criteriaAnalysis.weak?.length || 0;
+      const missingCount = criteriaAnalysis.missing?.length || 0;
+
+      showNotification(
+        `Analysis complete: ${strongCount} strong, ${weakCount} need more evidence, ${missingCount} missing criteria`,
+        recommendation.status === 'ready' ? 'success' : 'info'
+      );
+    } else {
+      showNotification('Classification complete!', 'success');
+    }
+
+    renderReviewList();
+
+  } catch (error) {
+    console.error('AI classification error:', error);
+    showNotification(`Classification failed: ${error.message}`, 'error');
+  } finally {
+    aiBtn.disabled = false;
+    aiBtn.innerHTML = '<span>🤖</span> Run AI Classification';
+  }
 }
 
 // ============================================

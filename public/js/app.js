@@ -945,10 +945,63 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ============================================
+// Service Configuration Check
+// ============================================
+
+let serviceConfig = null;
+
+async function checkServiceConfig() {
+  try {
+    const response = await fetch('/api/pdf/config-status');
+    if (response.ok) {
+      serviceConfig = await response.json();
+
+      // Warn if URL conversion is unavailable
+      if (!serviceConfig.urlConversion) {
+        const urlTab = document.querySelector('[data-upload-tab="url"]');
+        if (urlTab) {
+          urlTab.innerHTML += ' <span style="color: var(--warning);" title="URL conversion unavailable">⚠️</span>';
+        }
+
+        const urlUploadSection = document.getElementById('upload-url');
+        if (urlUploadSection) {
+          const warning = document.createElement('div');
+          warning.className = 'notification warning';
+          warning.style.marginBottom = '16px';
+          warning.innerHTML = '<strong>⚠️ URL Conversion Unavailable:</strong> The server is not configured for URL-to-PDF conversion. Please upload PDFs directly or contact the administrator.';
+          urlUploadSection.prepend(warning);
+        }
+      }
+
+      // Warn if email is unavailable
+      if (!serviceConfig.email) {
+        const emailOption = document.querySelector('#deliveryMethod option[value="email"]');
+        if (emailOption) {
+          emailOption.textContent += ' (unavailable)';
+          emailOption.disabled = true;
+        }
+      }
+
+      // Warn if Google Drive is unavailable
+      if (!serviceConfig.googleDrive) {
+        const driveOption = document.querySelector('#deliveryMethod option[value="drive"]');
+        if (driveOption) {
+          driveOption.textContent += ' (unavailable)';
+          driveOption.disabled = true;
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Could not check service config:', error);
+  }
+}
+
+// ============================================
 // Initialize
 // ============================================
 
 document.addEventListener('DOMContentLoaded', () => {
   updateFilesList();
   updateContinueButton();
+  checkServiceConfig();
 });

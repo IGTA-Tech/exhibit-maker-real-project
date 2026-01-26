@@ -5,6 +5,20 @@ const path = require('path');
 
 const API_KEY = process.env.API2PDF_API_KEY;
 
+// Log API key status on startup (for debugging)
+if (!API_KEY) {
+  console.warn('⚠️ WARNING: API2PDF_API_KEY is not configured. URL-to-PDF conversion will not work.');
+} else {
+  console.log('✓ API2PDF_API_KEY configured (length: ' + API_KEY.length + ')');
+}
+
+/**
+ * Check if API is configured and working
+ */
+function isApiConfigured() {
+  return !!API_KEY && API_KEY.length > 10;
+}
+
 // Common errors that indicate retry might help
 const RETRYABLE_ERRORS = [
   'ETIMEDOUT',
@@ -454,5 +468,6 @@ module.exports = {
   parseUrls,
   isPdfEncrypted,
   isValidUrl,
-  sanitizeFileName
+  sanitizeFileName,
+  isApiConfigured
 };

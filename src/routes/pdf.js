@@ -223,6 +223,162 @@ router.get('/jobs', async (req, res) => {
 });
 
 /**
+ * Get service configuration status
+ * GET /api/pdf/config-status
+ * Returns which features are available
+ */
+router.get('/config-status', (req, res) => {
+  res.json({
+    urlConversion: pdfService.isApiConfigured(),
+    pdfUpload: true,
+    aiClassification: !!process.env.ANTHROPIC_API_KEY || !!process.env.OPENAI_API_KEY,
+    googleDrive: !!process.env.GOOGLE_CREDENTIALS_BASE64,
+    email: !!process.env.SENDGRID_API_KEY || !!process.env.EMAIL_PASSWORD,
+    supabase: !!process.env.SUPABASE_URL,
+    message: !pdfService.isApiConfigured()
+      ? 'URL-to-PDF conversion is unavailable. API2PDF_API_KEY not configured.'
+      : 'All services configured'
+  });
+});
+
+/**
+ * Get job by ID (alias for /status/:jobId)
+ * GET /api/pdf/jobs/:jobId
+ */
+router.get('/jobs/:jobId', async (req, res) => {
+  try {
+    const job = await jobStorage.getJob(req.params.jobId);
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    res.json(job);
+  } catch (error) {
+    console.error('Error getting job:', error);
+    res.status(500).json({ error: 'Failed to get job' });
+  }
+});
+
+/**
+ * Generate exhibits from URLs (alias for /generate with URL-only workflow)
+ * POST /api/pdf/generate-exhibits
+ * Accepts JSON body with:
+ * - urls: array of URL strings or objects with {url, label}
+ * - visaType: string (optional)
+ * - beneficiaryName: string (optional)
+ * - caseName: string (optional)
+ * - deliveryMethod: 'download' | 'email' | 'drive'
+ * - recipientEmail: string (required for email/drive)
+ */
+router.post('/generate-exhibits', async (req, res) => {
+  let tempDir = null;
+
+  try {
+    const {
+      urls = [],
+      visaType = '',
+      beneficiaryName = '',
+      caseName = '',
+      numberingStyle = 'letters',
+      enableToc = true,
+      enableCoverPages = true,
+      deliveryMethod = 'download',
+      recipientEmail = ''
+    } = req.body;
+
+    // Validate URLs
+    if (!urls || !Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ error: 'urls array is required' });
+    }
+
+    // Parse and validate URL list
+    const validUrls = urls
+      .map((item, idx) => {
+        const url = typeof item === 'string' ? item : item?.url;
+        const label = typeof item === 'object' ? item.label : `Document ${idx + 1}`;
+        return { url, label };
+      })
+      .filter(item => item.url && isValidUrl(item.url));
+
+    if (validUrls.length === 0) {
+      return res.status(400).json({ error: 'No valid URLs provided' });
+    }
+
+    // Limit URLs
+    if (validUrls.length > 50) {
+      return res.status(400).json({ error: 'Maximum 50 URLs per request' });
+    }
+
+    // Validate email if delivery method requires it
+    if ((deliveryMethod === 'email' || deliveryMethod === 'drive') && !recipientEmail) {
+      return res.status(400).json({ error: 'recipientEmail is required for email/drive delivery' });
+    }
+
+    // Create job
+    const jobId = uuidv4();
+    tempDir = path.join(__dirname, '../../temp', jobId);
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    // Convert URLs to exhibit format
+    const exhibitsData = validUrls.map((item, idx) => ({
+      id: `url_${idx}`,
+      type: 'url',
+      url: item.url,
+      label: sanitizeString(item.label),
+      order: idx
+    }));
+
+    // Create job in storage
+    await jobStorage.createJob({
+      id: jobId,
+      status: 'processing',
+      progress: 0,
+      totalExhibits: exhibitsData.length,
+      processedExhibits: 0,
+      successCount: 0,
+      failedCount: 0,
+      deliveryMethod,
+      recipientEmail,
+      caseName: caseName || `Exhibits_${new Date().toISOString().split('T')[0]}`,
+      logs: [],
+      createdAt: new Date().toISOString(),
+    });
+
+    // Return immediately and process in background
+    res.json({
+      success: true,
+      jobId,
+      message: `Started processing ${exhibitsData.length} URLs`,
+      statusUrl: `/api/pdf/status/${jobId}`,
+    });
+
+    // Process in background
+    processExhibitPackage(
+      jobId,
+      exhibitsData,
+      [], // No uploaded files
+      tempDir,
+      {
+        visaType,
+        beneficiaryName,
+        caseName,
+        numberingStyle,
+        enableToc,
+        enableCoverPages,
+        deliveryMethod,
+        recipientEmail
+      }
+    );
+
+  } catch (error) {
+    console.error('Error starting generate-exhibits job:', error);
+    if (tempDir) cleanupDir(tempDir);
+    res.status(500).json({ error: 'Failed to start generation job' });
+  }
+});
+
+/**
  * Process job in background
  */
 async function processJob(jobId, urlList, tempDir, deliveryMethod, recipientEmail, folderName) {
@@ -508,6 +664,12 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
             pdfPath = filePath;
           }
         } else if (exhibit.type === 'url' && exhibit.url) {
+          // Check if API is configured
+          if (!pdfService.isApiConfigured()) {
+            await jobStorage.addLog(jobId, `ERROR: URL conversion unavailable - API2PDF_API_KEY not configured on server`);
+            continue;
+          }
+
           // Convert URL to PDF using api2pdf
           await jobStorage.addLog(jobId, `Converting URL: ${exhibit.label || exhibit.url.substring(0, 50)}...`);
           const fileName = `url_${exhibit.id}.pdf`;
@@ -856,6 +1018,176 @@ router.post('/suggest-name', pdfUpload.single('file'), async (req, res) => {
   } catch (error) {
     console.error('Suggest name error:', error);
     res.status(500).json({ error: 'Failed to suggest name' });
+  }
+});
+
+/**
+ * Get document types that support a specific criterion
+ * GET /api/pdf/visa-types/:type/criteria/:criterionId/documents
+ */
+router.get('/visa-types/:type/criteria/:criterionId/documents', (req, res) => {
+  const { type, criterionId } = req.params;
+  const documentTypes = aiClassificationService.getDocumentTypesForCriterion(type, criterionId);
+
+  if (!documentTypes) {
+    return res.status(404).json({ error: 'Visa type or criterion not found' });
+  }
+
+  res.json(documentTypes);
+});
+
+/**
+ * Get all document type mappings for labeling assistance
+ * GET /api/pdf/document-types
+ */
+router.get('/document-types', (req, res) => {
+  const documentTypeMap = aiClassificationService.getDocumentTypeMap();
+  res.json({ documentTypes: documentTypeMap });
+});
+
+/**
+ * Suggest optimal exhibit ordering based on classifications
+ * POST /api/pdf/suggest-order
+ */
+router.post('/suggest-order', async (req, res) => {
+  try {
+    const { classifiedDocuments, visaType } = req.body;
+
+    if (!visaType) {
+      return res.status(400).json({ error: 'visaType is required' });
+    }
+
+    if (!classifiedDocuments || !Array.isArray(classifiedDocuments)) {
+      return res.status(400).json({ error: 'classifiedDocuments array is required' });
+    }
+
+    const orderedDocuments = aiClassificationService.suggestExhibitOrder(classifiedDocuments, visaType);
+
+    res.json({
+      success: true,
+      orderedDocuments,
+    });
+
+  } catch (error) {
+    console.error('Suggest order error:', error);
+    res.status(500).json({ error: 'Failed to suggest order: ' + error.message });
+  }
+});
+
+/**
+ * Generate comprehensive exhibit summary report
+ * POST /api/pdf/exhibit-summary
+ */
+router.post('/exhibit-summary', async (req, res) => {
+  try {
+    const { classifiedDocuments, visaType } = req.body;
+
+    if (!visaType) {
+      return res.status(400).json({ error: 'visaType is required' });
+    }
+
+    if (!classifiedDocuments || !Array.isArray(classifiedDocuments)) {
+      return res.status(400).json({ error: 'classifiedDocuments array is required' });
+    }
+
+    const summary = aiClassificationService.generateExhibitSummary(classifiedDocuments, visaType);
+
+    if (!summary) {
+      return res.status(400).json({ error: 'Could not generate summary for visa type' });
+    }
+
+    res.json({
+      success: true,
+      summary,
+    });
+
+  } catch (error) {
+    console.error('Exhibit summary error:', error);
+    res.status(500).json({ error: 'Failed to generate summary: ' + error.message });
+  }
+});
+
+/**
+ * Get eligibility scoring thresholds
+ * GET /api/pdf/eligibility-scores
+ */
+router.get('/eligibility-scores', (req, res) => {
+  res.json({
+    scores: aiClassificationService.ELIGIBILITY_SCORES,
+    explanation: {
+      'O-1_READY': '85%+ score indicates candidate is ready to file O-1 within 30 days',
+      'O-1_DEVELOPMENT': '60-84% score indicates candidate needs evidence building (6-12 months)',
+      'O-1_NOT_VIABLE': 'Below 60% may require extended development or alternative visa paths'
+    }
+  });
+});
+
+/**
+ * Classify and organize exhibits in one step
+ * POST /api/pdf/classify-and-organize
+ */
+router.post('/classify-and-organize', pdfUpload.array('files', 50), async (req, res) => {
+  try {
+    const { visaType } = req.body;
+
+    if (!visaType) {
+      return res.status(400).json({ error: 'visaType is required' });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    // Parse labels if provided
+    let labels = {};
+    if (req.body.labels) {
+      try {
+        labels = JSON.parse(req.body.labels);
+      } catch (e) {
+        // Ignore parse error
+      }
+    }
+
+    // Prepare documents for classification
+    const documents = req.files.map((file, idx) => ({
+      id: file.filename,
+      path: file.path,
+      label: labels[file.originalname] || file.originalname.replace(/\.pdf$/i, ''),
+      originalFilename: file.originalname,
+    }));
+
+    // Classify documents
+    const classifications = await aiClassificationService.classifyDocuments(documents, visaType);
+
+    // Suggest optimal ordering
+    const orderedDocuments = aiClassificationService.suggestExhibitOrder(classifications, visaType);
+
+    // Generate comprehensive summary
+    const summary = aiClassificationService.generateExhibitSummary(classifications, visaType);
+
+    // Analyze for missing criteria
+    const analysis = await aiClassificationService.analyzeMissingCriteria(classifications, visaType);
+
+    // Clean up uploaded files
+    for (const file of req.files) {
+      try {
+        fs.unlinkSync(file.path);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+
+    res.json({
+      success: true,
+      classifications,
+      orderedDocuments,
+      summary,
+      analysis,
+    });
+
+  } catch (error) {
+    console.error('Classify and organize error:', error);
+    res.status(500).json({ error: 'Classification failed: ' + error.message });
   }
 });
 

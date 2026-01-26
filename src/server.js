@@ -62,8 +62,11 @@ app.use(limiter);
 // Stricter rate limit for conversion endpoint
 const conversionLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 20, // 20 conversions per hour per IP
-  message: { error: 'Conversion limit reached. Please try again later.' },
+  max: parseInt(process.env.CONVERSION_RATE_LIMIT) || 100, // 100 conversions per hour per IP (configurable)
+  standardHeaders: true, // Return rate limit info in headers
+  legacyHeaders: false,
+  message: { error: 'Conversion limit reached. Please try again later.', retryAfter: '1 hour' },
+  skip: (req) => req.path === '/status' || req.path.startsWith('/status/'), // Skip status checks
 });
 
 // Body parsing
@@ -112,6 +115,12 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     environment: process.env.NODE_ENV || 'development',
+    features: {
+      api2pdf: !!process.env.API2PDF_API_KEY,
+      supabase: !!process.env.SUPABASE_URL,
+      googleDrive: !!process.env.GOOGLE_CREDENTIALS_BASE64,
+      email: !!process.env.SENDGRID_API_KEY || !!process.env.EMAIL_PASSWORD,
+    }
   });
 });
 

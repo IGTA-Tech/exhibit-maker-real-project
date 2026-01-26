@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>URL to PDF Converter</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>URL to PDF Converter</h1>
+      <p>Convert multiple URLs to PDFs and deliver via Google Drive or Email</p>
+    </header>
+
+    <main>
+      <form id="convertForm">
+        <!-- Step 1: Input URLs -->
+        <section class="card">
+          <h2><span class="step">1</span> Add URLs</h2>
+          <p class="hint">Paste URLs (one per line) or upload a file (TXT, CSV, or JSON)</p>
+
+          <div class="tabs">
+            <button type="button" class="tab active" data-tab="paste">Paste URLs</button>
+            <button type="button" class="tab" data-tab="upload">Upload File</button>
+          </div>
+
+          <div class="tab-content active" id="paste-content">
+            <textarea
+              id="urlText"
+              name="urlText"
+              rows="10"
+              placeholder="https://example.com/page1
+https://example.com/page2
+https://example.com/page3
+
+Or use CSV format:
+https://example.com/page1, Label for page 1, custom_filename.pdf
+https://example.com/page2, Label for page 2"
+            ></textarea>
+            <div class="url-count">URLs detected: <span id="urlCount">0</span></div>
+          </div>
+
+          <div class="tab-content" id="upload-content">
+            <div class="file-drop" id="fileDrop">
+              <input type="file" id="urlFile" name="urlFile" accept=".txt,.csv,.json" hidden>
+              <div class="file-drop-icon">📄</div>
+              <p>Drag & drop a file here or <button type="button" class="link-btn" onclick="document.getElementById('urlFile').click()">browse</button></p>
+              <span class="hint">Accepts .txt, .csv, or .json files</span>
+            </div>
+            <div id="fileInfo" class="file-info hidden"></div>
+          </div>
+        </section>
+
+        <!-- Step 2: Delivery Options -->
+        <section class="card">
+          <h2><span class="step">2</span> Delivery Options</h2>
+
+          <div class="form-group">
+            <label for="recipientEmail">Recipient Email *</label>
+            <input
+              type="email"
+              id="recipientEmail"
+              name="recipientEmail"
+              placeholder="recipient@example.com"
+              required
+            >
+          </div>
+
+          <div class="form-group">
+            <label for="folderName">Folder/Project Name (optional)</label>
+            <input
+              type="text"
+              id="folderName"
+              name="folderName"
+              placeholder="My PDF Collection"
+            >
+          </div>
+
+          <div class="form-group">
+            <label>Delivery Method *</label>
+            <div class="radio-group">
+              <label class="radio-card">
+                <input type="radio" name="deliveryMethod" value="drive" checked>
+                <div class="radio-content">
+                  <span class="radio-icon">📁</span>
+                  <div>
+                    <strong>Google Drive</strong>
+                    <p>Creates a shared folder with all PDFs</p>
+                  </div>
+                </div>
+              </label>
+              <label class="radio-card">
+                <input type="radio" name="deliveryMethod" value="email">
+                <div class="radio-content">
+                  <span class="radio-icon">📧</span>
+                  <div>
+                    <strong>Email (ZIP)</strong>
+                    <p>Sends a ZIP file via email (max 25MB)</p>
+                  </div>
+                </div>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- Step 3: Convert -->
+        <section class="card">
+          <h2><span class="step">3</span> Convert</h2>
+          <button type="submit" id="convertBtn" class="btn btn-primary btn-large">
+            Start Conversion
+          </button>
+        </section>
+      </form>
+
+      <!-- Progress Section -->
+      <section id="progressSection" class="card hidden">
+        <h2>Conversion Progress</h2>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="progress-text">
+            <span id="progressPercent">0%</span>
+            <span id="progressStatus">Initializing...</span>
+          </div>
+        </div>
+        <div class="stats-row" id="statsRow">
+          <div class="stat">
+            <div class="stat-value" id="statTotal">0</div>
+            <div class="stat-label">Total</div>
+          </div>
+          <div class="stat success">
+            <div class="stat-value" id="statSuccess">0</div>
+            <div class="stat-label">Converted</div>
+          </div>
+          <div class="stat error">
+            <div class="stat-value" id="statFailed">0</div>
+            <div class="stat-label">Failed</div>
+          </div>
+        </div>
+        <div class="log-container">
+          <h3>Activity Log</h3>
+          <div id="logContent" class="log-content"></div>
+        </div>
+      </section>
+
+      <!-- Result Section -->
+      <section id="resultSection" class="card hidden">
+        <div id="resultContent"></div>
+        <button type="button" class="btn btn-secondary" onclick="resetForm()">Convert More URLs</button>
+      </section>
+    </main>
+
+    <footer>
+      <p>Powered by api2pdf | Google Drive API | Nodemailer</p>
+    </footer>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

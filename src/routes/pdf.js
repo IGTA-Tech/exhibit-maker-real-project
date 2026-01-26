@@ -13,8 +13,8 @@ const jobStorage = require('../services/jobStorageService');
 const exhibitService = require('../services/exhibitService');
 const tocGenerator = require('../services/tocGenerator');
 
-// Configure multer for PDF uploads
-const upload = multer({
+// Configure multer for PDF uploads (exhibit generation)
+const pdfUpload = multer({
   dest: path.join(__dirname, '../../uploads'),
   limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max
   fileFilter: (req, file, cb) => {
@@ -22,6 +22,21 @@ const upload = multer({
       cb(null, true);
     } else {
       cb(new Error('Only PDF files are allowed'), false);
+    }
+  }
+});
+
+// Configure multer for URL file uploads (text/csv/json with URLs)
+const urlFileUpload = multer({
+  dest: path.join(__dirname, '../../uploads'),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['.txt', '.csv', '.json'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedTypes.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .txt, .csv, and .json files are allowed'), false);
     }
   }
 });
@@ -80,7 +95,7 @@ function sanitizeString(str) {
  * Start a new PDF conversion job
  * POST /api/pdf/convert
  */
-router.post('/convert', convertValidation, async (req, res) => {
+router.post('/convert', urlFileUpload.single('urlFile'), convertValidation, async (req, res) => {
   try {
     // Check validation errors
     const errors = validationResult(req);
@@ -379,7 +394,7 @@ function cleanupDir(dirPath) {
  * - exhibits: JSON string with exhibit metadata
  * - files: PDF files
  */
-router.post('/generate', upload.array('files', 100), async (req, res) => {
+router.post('/generate', pdfUpload.array('files', 100), async (req, res) => {
   let tempDir = null;
 
   try {

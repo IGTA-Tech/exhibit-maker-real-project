@@ -25,7 +25,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
       imgSrc: ["'self'", "data:", "https:"],
       connectSrc: ["'self'"],
     },
@@ -115,8 +115,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API routes
-app.use('/api/pdf', upload.single('urlFile'), conversionLimiter, pdfRoutes);
+// API routes - Note: multer is handled within pdf routes for specific endpoints
+app.use('/api/pdf', conversionLimiter, pdfRoutes);
 
 // Serve main page
 app.get('/', (req, res) => {

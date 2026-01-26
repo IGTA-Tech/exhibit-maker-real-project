@@ -184,8 +184,8 @@ async function createZipFromPdfs(pdfFiles, outputPath, indexContent = null) {
 async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipFileName) {
   const mail = await initializeEmail();
 
-  // Get sender email
-  let fromEmail = process.env.EMAIL_USER;
+  // Get sender email - prefer EMAIL_FROM, fallback to EMAIL_USER
+  let fromEmail = process.env.EMAIL_FROM || process.env.EMAIL_USER;
   if (!fromEmail) {
     const token = getToken();
     if (token) {
@@ -207,6 +207,11 @@ async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipF
       }
     ]
   };
+
+  // Add reply-to if configured
+  if (process.env.EMAIL_REPLY_TO) {
+    mailOptions.replyTo = process.env.EMAIL_REPLY_TO;
+  }
 
   try {
     const info = await mail.sendMail(mailOptions);

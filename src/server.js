@@ -49,6 +49,17 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
+// ============================================
+// Timeout and Large File Configuration
+// ============================================
+
+// Increase timeout for long-running requests (5 minutes)
+app.use((req, res, next) => {
+  req.setTimeout(300000); // 5 minutes
+  res.setTimeout(300000); // 5 minutes
+  next();
+});
+
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -70,9 +81,9 @@ const conversionLimiter = rateLimit({
   skip: (req) => req.path === '/status' || req.path.startsWith('/status/'), // Skip status checks
 });
 
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Body parsing - Increased limits for large files
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Static files
 app.use(express.static(path.join(__dirname, '../public')));
@@ -81,6 +92,18 @@ app.use(express.static(path.join(__dirname, '../public')));
 const uploadsDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Ensure temp directory exists
+const tempDir = path.join(__dirname, '../temp');
+if (!fs.existsSync(tempDir)) {
+  fs.mkdirSync(tempDir, { recursive: true });
+}
+
+// Ensure output directory exists
+const outputDir = path.join(__dirname, '../output');
+if (!fs.existsSync(outputDir)) {
+  fs.mkdirSync(outputDir, { recursive: true });
 }
 
 // File upload configuration
@@ -98,15 +121,15 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
-    const allowedTypes = ['.txt', '.csv', '.json', '.zip'];
+    const allowedTypes = ['.txt', '.csv', '.json', '.zip', '.pdf'];
     const ext = path.extname(file.originalname).toLowerCase();
     if (allowedTypes.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Only .txt, .csv, .json, and .zip files are allowed'));
+      cb(new Error('Only .txt, .csv, .json, .zip, and .pdf files are allowed'));
     }
   },
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit for ZIP files
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
 });
 
 // Health check endpoint
@@ -117,7 +140,7 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     environment: process.env.NODE_ENV || 'development',
     features: {
-      api2pdf: !!process.env.API2PDF_API_KEY,
+      puppeteer: true,
       supabase: !!process.env.SUPABASE_URL,
       googleDrive: !!process.env.GOOGLE_CREDENTIALS_BASE64,
       email: !!process.env.SENDGRID_API_KEY || !!process.env.EMAIL_PASSWORD,
@@ -144,7 +167,12 @@ app.use((err, req, res, next) => {
 
   // Handle multer errors
   if (err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(400).json({ error: 'File too large. Maximum size is 50MB.' });
+    return res.status(400).json({ error: 'File too large. Maximum size is 100MB.' });
+  }
+
+  // Handle timeout errors
+  if (err.code === 'ETIMEDOUT' || err.message.includes('timeout')) {
+    return res.status(504).json({ error: 'Request timeout. Please try with a smaller file or fewer URLs.' });
   }
 
   // Don't leak error details in production
@@ -152,7 +180,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: message });
 });
 
-// Start server
+// Start server with increased timeout
 const server = app.listen(PORT, () => {
   console.log(`
   ╔════════════════════════════════════════════════════════════╗
@@ -162,17 +190,32 @@ const server = app.listen(PORT, () => {
   ║   Environment: ${(process.env.NODE_ENV || 'development').padEnd(40)}║
   ║                                                            ║
   ║   Features:                                                ║
-  ║   - URL to PDF conversion via api2pdf                      ║
+  ║   - URL to PDF conversion via Puppeteer                    ║
   ║   - Exhibit cover page generation                          ║
   ║   - Google Drive / Email delivery                          ║
-  ║   - Persistent job storage (Supabase)                      ║
+  ║   - Supabase Storage for large files                       ║
+  ║   - PDF Compression via Ghostscript                        ║
   ╚════════════════════════════════════════════════════════════╝
   `);
 });
 
+// Increase server timeout to 5 minutes
+server.timeout = 300000;
+server.keepAliveTimeout = 300000;
+server.headersTimeout = 310000;
+
 // Graceful shutdown
-const gracefulShutdown = (signal) => {
+const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} received. Shutting down gracefully...`);
+
+  // Close Puppeteer browser if running
+  try {
+    const pdfService = require('./services/pdfService');
+    await pdfService.closeBrowser();
+    console.log('Puppeteer browser closed.');
+  } catch (e) {
+    // Ignore if not initialized
+  }
 
   server.close(() => {
     console.log('HTTP server closed.');

@@ -50,5 +50,5 @@ RUN mkdir -p /app/temp /app/output && chmod 777 /app/temp /app/output
 # Expose port
 EXPOSE 3000
 
-# Start the app
-CMD ["node", "src/server.js"]
+# Increase Node.js memory limit and start the app
+CMD ["node", "--max-old-space-size=512", "src/server.js"]

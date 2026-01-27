@@ -120,14 +120,14 @@ async function closeBrowser() {
 async function convertUrlToPdf(url, options = {}) {
   const {
     timeout = 60000,
-    waitUntil = 'networkidle2',
+    waitUntil = 'load', // Changed from networkidle2 to avoid frame detachment issues
     format = 'Letter',
     margin = { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
     printBackground = true,
     scale = 1,
     landscape = false,
     waitForSelector = null,
-    delay = 1000, // Wait after page load for dynamic content
+    delay = 2000, // Increased delay for dynamic content
   } = options;
 
   let page = null;
@@ -144,12 +144,44 @@ async function convertUrlToPdf(url, options = {}) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
 
-    // Navigate to URL
-    console.log(`Converting URL to PDF: ${url}`);
-    await page.goto(url, {
-      waitUntil: waitUntil,
-      timeout: timeout,
+    // Block unnecessary resources to speed up loading and avoid frame issues
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      // Block videos, media, and some heavy resources
+      if (['media', 'websocket', 'manifest', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
     });
+
+    // Navigate to URL with retry on frame detachment
+    console.log(`Converting URL to PDF: ${url}`);
+    
+    let response;
+    try {
+      response = await page.goto(url, {
+        waitUntil: waitUntil,
+        timeout: timeout,
+      });
+    } catch (navError) {
+      // If frame detached, try again with simpler wait condition
+      if (navError.message.includes('frame was detached') || navError.message.includes('Navigating frame')) {
+        console.log('Frame detached, retrying with domcontentloaded...');
+        await page.close().catch(() => {});
+        page = await browserInstance.newPage();
+        await page.setViewport({ width: 1920, height: 1080 });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
+        response = await page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: timeout,
+        });
+      } else {
+        throw navError;
+      }
+    }
 
     // Wait for specific selector if provided
     if (waitForSelector) {
@@ -163,6 +195,19 @@ async function convertUrlToPdf(url, options = {}) {
       await new Promise(resolve => setTimeout(resolve, delay));
     }
 
+    // Wait for page to be stable (no more than 2 network connections for 500ms)
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        if (document.readyState === 'complete') {
+          resolve();
+        } else {
+          window.addEventListener('load', resolve);
+          // Fallback timeout
+          setTimeout(resolve, 3000);
+        }
+      });
+    }).catch(() => {});
+
     // Generate PDF
     const pdfBuffer = await page.pdf({
       format: format,
@@ -171,10 +216,11 @@ async function convertUrlToPdf(url, options = {}) {
       scale: scale,
       landscape: landscape,
       preferCSSPageSize: false,
+      timeout: 60000,
     });
 
     // Get page title for filename
-    const title = await page.title();
+    const title = await page.title().catch(() => 'document');
     const sanitizedTitle = title
       ? title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)
       : 'document';

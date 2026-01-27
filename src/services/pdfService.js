@@ -6,14 +6,63 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const { PDFDocument } = require('pdf-lib');
 
 // Determine environment
 const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT;
 
 let browser = null;
-let puppeteer = null;
-let chromium = null;
+
+/**
+ * Find Chrome/Chromium executable path
+ */
+function findChromePath() {
+  // Check environment variable first
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
+  // Common paths to check
+  const possiblePaths = [
+    // Railway/Nixpacks
+    '/nix/store/chromium/bin/chromium',
+    // Linux
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    // Try to find via which command
+  ];
+
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+
+  // Try which command on Linux
+  try {
+    const chromiumPath = execSync('which chromium || which chromium-browser || which google-chrome', { encoding: 'utf8' }).trim();
+    if (chromiumPath && fs.existsSync(chromiumPath)) {
+      return chromiumPath;
+    }
+  } catch (e) {
+    // Ignore errors
+  }
+
+  // Try to find in nix store (Railway)
+  try {
+    const nixPath = execSync('find /nix/store -name "chromium" -type f -executable 2>/dev/null | head -1', { encoding: 'utf8' }).trim();
+    if (nixPath && fs.existsSync(nixPath)) {
+      return nixPath;
+    }
+  } catch (e) {
+    // Ignore errors
+  }
+
+  return null;
+}
 
 /**
  * Initialize Puppeteer with the right browser for the environment
@@ -23,26 +72,45 @@ async function initBrowser() {
 
   try {
     if (isProduction) {
-      // Production: Use puppeteer-core with @sparticuz/chromium
-      puppeteer = require('puppeteer-core');
-      chromium = require('@sparticuz/chromium');
+      // Production: Use puppeteer-core with system Chrome
+      const puppeteer = require('puppeteer-core');
       
-      // Configure chromium for serverless
-      chromium.setHeadlessMode = true;
-      chromium.setGraphicsMode = false;
+      let executablePath = findChromePath();
+      
+      // If no system Chrome found, try @sparticuz/chromium as fallback
+      if (!executablePath) {
+        try {
+          const chromium = require('@sparticuz/chromium');
+          executablePath = await chromium.executablePath();
+          console.log('Using @sparticuz/chromium');
+        } catch (e) {
+          throw new Error('No Chrome/Chromium found. Install chromium on the system or add @sparticuz/chromium package.');
+        }
+      }
+
+      console.log(`Using Chrome at: ${executablePath}`);
       
       browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
+        executablePath: executablePath,
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-extensions',
+        ],
         ignoreHTTPSErrors: true,
       });
       
-      console.log('Puppeteer initialized with @sparticuz/chromium (production mode)');
+      console.log('Puppeteer initialized (production mode)');
     } else {
       // Development: Use regular puppeteer with bundled Chrome
-      puppeteer = require('puppeteer');
+      const puppeteer = require('puppeteer');
       
       browser = await puppeteer.launch({
         headless: 'new',

@@ -60,25 +60,25 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rate limiting
+// Rate limiting - Increased limits
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX) || 100, // limit each IP
+  max: parseInt(process.env.RATE_LIMIT_MAX) || 500, // 500 requests per 15 min per IP
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
-  skip: (req) => req.path === '/health', // Skip health checks
+  skip: (req) => req.path === '/health' || req.path.startsWith('/api/pdf/status'), // Skip health and status checks
 });
 app.use(limiter);
 
-// Stricter rate limit for conversion endpoint
+// Rate limit for conversion endpoint (more generous)
 const conversionLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: parseInt(process.env.CONVERSION_RATE_LIMIT) || 100, // 100 conversions per hour per IP (configurable)
-  standardHeaders: true, // Return rate limit info in headers
+  max: parseInt(process.env.CONVERSION_RATE_LIMIT) || 500, // 500 conversions per hour per IP
+  standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Conversion limit reached. Please try again later.', retryAfter: '1 hour' },
-  skip: (req) => req.path === '/status' || req.path.startsWith('/status/'), // Skip status checks
+  skip: (req) => req.path.includes('/status') || req.method === 'GET', // Skip status checks and GET requests
 });
 
 // Body parsing - Increased limits for large files

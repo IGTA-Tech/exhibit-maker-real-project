@@ -13,6 +13,7 @@ const jobStorage = require('../services/jobStorageService');
 const exhibitService = require('../services/exhibitService');
 const tocGenerator = require('../services/tocGenerator');
 const aiClassificationService = require('../services/aiClassificationService');
+const compressionService = require('../services/compressionService');
 
 // Configure multer for PDF uploads (exhibit generation)
 const pdfUpload = multer({
@@ -227,17 +228,20 @@ router.get('/jobs', async (req, res) => {
  * GET /api/pdf/config-status
  * Returns which features are available
  */
-router.get('/config-status', (req, res) => {
+router.get('/config-status', async (req, res) => {
+  const compressionAvailable = await compressionService.isAvailable();
+  
   res.json({
-    urlConversion: pdfService.isApiConfigured(),
+    urlConversion: true, // Always true with Puppeteer
     pdfUpload: true,
+    pdfCompression: compressionAvailable,
     aiClassification: !!process.env.ANTHROPIC_API_KEY || !!process.env.OPENAI_API_KEY,
     googleDrive: !!process.env.GOOGLE_CREDENTIALS_BASE64,
     email: !!process.env.SENDGRID_API_KEY || !!process.env.EMAIL_PASSWORD,
     supabase: !!process.env.SUPABASE_URL,
-    message: !pdfService.isApiConfigured()
-      ? 'URL-to-PDF conversion is unavailable. API2PDF_API_KEY not configured.'
-      : 'All services configured'
+    message: compressionAvailable 
+      ? 'All services configured (using Puppeteer for PDF conversion, Ghostscript for compression)'
+      : 'PDF compression unavailable - install Ghostscript for smaller file sizes'
   });
 });
 
@@ -664,27 +668,17 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
             pdfPath = filePath;
           }
         } else if (exhibit.type === 'url' && exhibit.url) {
-          // Check if API is configured
-          if (!pdfService.isApiConfigured()) {
-            await jobStorage.addLog(jobId, `ERROR: URL conversion unavailable - API2PDF_API_KEY not configured on server`);
-            continue;
-          }
-
-          // Convert URL to PDF using api2pdf
+          // Convert URL to PDF using Puppeteer
           await jobStorage.addLog(jobId, `Converting URL: ${exhibit.label || exhibit.url.substring(0, 50)}...`);
           const fileName = `url_${exhibit.id}.pdf`;
           const result = await pdfService.convertUrlToPdfWithRetry(exhibit.url, fileName);
 
-          if (result.success && result.fileUrl) {
-            // Download the converted PDF to temp directory
+          if (result.success && result.pdfBuffer) {
+            // Save the PDF buffer to temp directory
             const localPath = path.join(tempDir, fileName);
-            try {
-              await pdfService.downloadPdfWithRetry(result.fileUrl, localPath);
-              pdfPath = localPath;
-              await jobStorage.addLog(jobId, `Converted: ${exhibit.label || fileName}`);
-            } catch (downloadErr) {
-              await jobStorage.addLog(jobId, `Failed to download converted PDF: ${downloadErr.message}`);
-            }
+            fs.writeFileSync(localPath, result.pdfBuffer);
+            pdfPath = localPath;
+            await jobStorage.addLog(jobId, `Converted: ${exhibit.label || fileName}`);
           } else {
             await jobStorage.addLog(jobId, `Failed to convert URL: ${result.error || 'Unknown error'}`);
           }
@@ -761,13 +755,50 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
     pdfPaths.push(...processedPdfs.map(p => p.processedPath || p.path));
 
     await exhibitService.combineExhibits(pdfPaths, outputPath);
-    await jobStorage.updateJob(jobId, { progress: 85 });
+    await jobStorage.updateJob(jobId, { progress: 80 });
 
-    // Get final file stats
-    const stats = fs.statSync(outputPath);
+    // Get initial file stats
+    let stats = fs.statSync(outputPath);
+    const originalSize = stats.size;
     const totalPages = processedPdfs.reduce((sum, p) => sum + (p.pageCount || 1), 0);
 
-    // Step 5: Deliver
+    // Step 5: Compress PDF if needed (especially for email)
+    const enableCompression = config.enableCompression !== false; // Default to true
+    const compressionPreset = config.compressionPreset || 'ebook';
+    let compressionResult = null;
+
+    if (enableCompression && await compressionService.isAvailable()) {
+      await jobStorage.addLog(jobId, 'Compressing PDF...');
+      await jobStorage.updateJob(jobId, { progress: 85 });
+
+      // For email, try to get under 20MB; otherwise just compress with preset
+      if (deliveryMethod === 'email' && originalSize > compressionService.MAX_EMAIL_SIZE) {
+        compressionResult = await compressionService.compressToTargetSize(
+          outputPath, 
+          null, 
+          compressionService.MAX_EMAIL_SIZE
+        );
+      } else {
+        compressionResult = await compressionService.compressPdf(outputPath, null, {
+          preset: compressionPreset,
+        });
+      }
+
+      if (compressionResult.success) {
+        stats = fs.statSync(outputPath); // Get updated stats
+        await jobStorage.addLog(jobId, 
+          `Compressed: ${compressionService.formatBytes(originalSize)} → ${compressionService.formatBytes(stats.size)} (${compressionResult.reduction} reduction)`
+        );
+      } else {
+        await jobStorage.addLog(jobId, `Compression skipped: ${compressionResult.error || 'Unknown error'}`);
+      }
+    } else if (enableCompression) {
+      await jobStorage.addLog(jobId, 'Compression skipped: Ghostscript not installed');
+    }
+
+    await jobStorage.updateJob(jobId, { progress: 90 });
+
+    // Step 6: Deliver
     await jobStorage.addLog(jobId, 'Preparing delivery...');
 
     if (deliveryMethod === 'download') {
@@ -778,6 +809,8 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
         downloadUrl: `/api/pdf/download/${jobId}`,
         outputPath: outputPath,
         packageSize: stats.size,
+        originalSize: originalSize,
+        compressionApplied: compressionResult?.success || false,
         totalPages: totalPages,
         completedAt: new Date().toISOString()
       });
@@ -794,6 +827,8 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
           progress: 100,
           driveLink: driveResult.webViewLink,
           packageSize: stats.size,
+          originalSize: originalSize,
+          compressionApplied: compressionResult?.success || false,
           totalPages: totalPages,
           completedAt: new Date().toISOString()
         });
@@ -803,11 +838,95 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
       }
 
     } else if (deliveryMethod === 'email' && recipientEmail) {
-      await jobStorage.addLog(jobId, 'Sending email...');
+      const MAX_EMAIL_ATTACHMENT_SIZE = 15 * 1024 * 1024; // 15MB threshold for Supabase upload
+      
+      // Check if file is too large for email attachment
+      if (stats.size > MAX_EMAIL_ATTACHMENT_SIZE) {
+        await jobStorage.addLog(jobId, `File size (${compressionService.formatBytes(stats.size)}) exceeds email attachment limit. Uploading to cloud storage...`);
+        
+        // Try Supabase Storage first
+        const supabaseService = require('../services/supabaseService');
+        if (supabaseService.isStorageAvailable()) {
+          await jobStorage.addLog(jobId, 'Uploading to Supabase Storage...');
+          
+          const fileName = `Exhibit_Package_${jobId.substring(0, 8)}.pdf`;
+          const uploadResult = await supabaseService.uploadPdfToStorage(outputPath, fileName, jobId);
+          
+          if (uploadResult.success) {
+            await jobStorage.addLog(jobId, 'Upload complete. Sending download link via email...');
+            
+            // Send email with download link
+            const emailResult = await emailService.sendEmailWithDownloadLink(
+              recipientEmail,
+              `Exhibit Package Ready: ${caseName || 'Your Documents'}`,
+              {
+                downloadUrl: uploadResult.signedUrl,
+                fileName: fileName,
+                fileSize: stats.size,
+                originalSize: originalSize,
+                expiresAt: uploadResult.expiresAt,
+                caseName: caseName || 'Your Documents',
+                totalExhibits: collectedPdfs.length,
+                totalPages: totalPages,
+                compressionApplied: compressionResult?.success || false,
+              }
+            );
+            
+            if (emailResult.success) {
+              await jobStorage.updateJob(jobId, {
+                status: 'completed',
+                progress: 100,
+                packageSize: stats.size,
+                originalSize: originalSize,
+                compressionApplied: compressionResult?.success || false,
+                totalPages: totalPages,
+                downloadUrl: uploadResult.signedUrl,
+                storagePath: uploadResult.path,
+                storageExpiresAt: uploadResult.expiresAt,
+                note: 'Large file uploaded to cloud storage. Download link sent via email.',
+                completedAt: new Date().toISOString()
+              });
+              await jobStorage.addLog(jobId, `Download link emailed to ${recipientEmail} (expires: ${new Date(uploadResult.expiresAt).toLocaleDateString()})`);
+              return;
+            } else {
+              await jobStorage.addLog(jobId, `Email failed: ${emailResult.error}. Trying Google Drive...`);
+            }
+          } else {
+            await jobStorage.addLog(jobId, `Supabase upload failed: ${uploadResult.error}. Trying Google Drive...`);
+          }
+        }
+        
+        // Fallback to Google Drive
+        if (process.env.GOOGLE_CREDENTIALS_BASE64) {
+          await jobStorage.addLog(jobId, 'Uploading to Google Drive...');
+          const driveResult = await googleDriveService.uploadFile(outputPath, caseName || 'Exhibit_Package');
+          if (driveResult.success) {
+            await googleDriveService.shareFile(driveResult.fileId, recipientEmail);
+            await jobStorage.updateJob(jobId, {
+              status: 'completed',
+              progress: 100,
+              driveLink: driveResult.webViewLink,
+              packageSize: stats.size,
+              originalSize: originalSize,
+              totalPages: totalPages,
+              note: 'File too large for email - uploaded to Google Drive instead',
+              completedAt: new Date().toISOString()
+            });
+            await jobStorage.addLog(jobId, `File uploaded to Google Drive and shared with ${recipientEmail}`);
+            return;
+          }
+        }
+        
+        throw new Error(`File size (${compressionService.formatBytes(stats.size)}) exceeds email attachment limit (15MB). Please configure Supabase Storage or Google Drive for large file delivery.`);
+      }
+
+      // File is small enough for email attachment
+      await jobStorage.addLog(jobId, 'Sending email with attachment...');
       const emailResult = await emailService.sendEmailWithZip(
         recipientEmail,
         `Exhibit Package: ${caseName || 'Your Documents'}`,
-        '<p>Please find your exhibit package attached.</p>',
+        `<p>Please find your exhibit package attached.</p>
+         <p><small>Package size: ${compressionService.formatBytes(stats.size)}${compressionResult?.success ? ` (compressed from ${compressionService.formatBytes(originalSize)})` : ''}</small></p>`,
         outputPath,
         'Exhibit_Package.pdf'
       );
@@ -817,10 +936,12 @@ async function processExhibitPackage(jobId, exhibitsData, uploadedFiles, tempDir
           status: 'completed',
           progress: 100,
           packageSize: stats.size,
+          originalSize: originalSize,
+          compressionApplied: compressionResult?.success || false,
           totalPages: totalPages,
           completedAt: new Date().toISOString()
         });
-        await jobStorage.addLog(jobId, `Email sent to ${recipientEmail}`);
+        await jobStorage.addLog(jobId, `Email with attachment sent to ${recipientEmail}`);
       } else {
         throw new Error(emailResult.error || 'Failed to send email');
       }
@@ -890,18 +1011,97 @@ router.get('/download/:jobId', async (req, res) => {
       return res.status(404).json({ error: 'Job not found' });
     }
 
-    if (job.status !== 'completed' || !job.outputPath) {
+    if (job.status !== 'completed') {
+      return res.status(400).json({ error: 'Package not ready for download' });
+    }
+
+    // Check if file is in Supabase Storage
+    if (job.storagePath) {
+      const supabaseService = require('../services/supabaseService');
+      
+      // Check if the signed URL has expired
+      if (job.storageExpiresAt && new Date(job.storageExpiresAt) < new Date()) {
+        // Generate a new signed URL
+        const newUrlResult = await supabaseService.getSignedUrl(job.storagePath);
+        if (newUrlResult.success) {
+          // Update job with new URL
+          await jobStorage.updateJob(req.params.jobId, {
+            downloadUrl: newUrlResult.signedUrl,
+            storageExpiresAt: newUrlResult.expiresAt,
+          });
+          return res.redirect(newUrlResult.signedUrl);
+        } else {
+          return res.status(410).json({ 
+            error: 'Download link expired and could not be refreshed',
+            suggestion: 'Please regenerate the package'
+          });
+        }
+      }
+      
+      // Redirect to Supabase signed URL
+      if (job.downloadUrl) {
+        return res.redirect(job.downloadUrl);
+      }
+    }
+
+    // Fallback to local file download
+    if (!job.outputPath) {
       return res.status(400).json({ error: 'Package not ready for download' });
     }
 
     if (!fs.existsSync(job.outputPath)) {
-      return res.status(404).json({ error: 'Package file not found' });
+      return res.status(404).json({ error: 'Package file not found. It may have been cleaned up.' });
     }
 
     res.download(job.outputPath, `Exhibit_Package_${req.params.jobId.substring(0, 8)}.pdf`);
   } catch (error) {
     console.error('Download error:', error);
     res.status(500).json({ error: 'Failed to download package' });
+  }
+});
+
+/**
+ * Refresh download link for a job (if stored in Supabase)
+ * POST /api/pdf/refresh-link/:jobId
+ */
+router.post('/refresh-link/:jobId', async (req, res) => {
+  try {
+    const job = await jobStorage.getJob(req.params.jobId);
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!job.storagePath) {
+      return res.status(400).json({ 
+        error: 'This job does not have a cloud storage file',
+        hasLocalFile: job.outputPath ? fs.existsSync(job.outputPath) : false
+      });
+    }
+
+    const supabaseService = require('../services/supabaseService');
+    const newUrlResult = await supabaseService.getSignedUrl(job.storagePath);
+
+    if (!newUrlResult.success) {
+      return res.status(500).json({ error: newUrlResult.error || 'Failed to refresh link' });
+    }
+
+    // Update job with new URL
+    await jobStorage.updateJob(req.params.jobId, {
+      downloadUrl: newUrlResult.signedUrl,
+      storageExpiresAt: newUrlResult.expiresAt,
+    });
+
+    res.json({
+      success: true,
+      downloadUrl: newUrlResult.signedUrl,
+      expiresAt: newUrlResult.expiresAt,
+      expiresIn: `${Math.round(supabaseService.SIGNED_URL_EXPIRY / 86400)} days`,
+    });
+
+  } catch (error) {
+    console.error('Refresh link error:', error);
+    res.status(500).json({ error: 'Failed to refresh download link' });
   }
 });
 
@@ -1188,6 +1388,141 @@ router.post('/classify-and-organize', pdfUpload.array('files', 50), async (req, 
   } catch (error) {
     console.error('Classify and organize error:', error);
     res.status(500).json({ error: 'Classification failed: ' + error.message });
+  }
+});
+
+// ============================================
+// Compression Endpoints
+// ============================================
+
+/**
+ * Get compression presets and availability
+ * GET /api/pdf/compression/presets
+ */
+router.get('/compression/presets', async (req, res) => {
+  const available = await compressionService.isAvailable();
+  
+  res.json({
+    available,
+    presets: compressionService.getPresets(),
+    maxEmailSize: compressionService.MAX_EMAIL_SIZE,
+    maxEmailSizeFormatted: compressionService.formatBytes(compressionService.MAX_EMAIL_SIZE),
+    installInstructions: available ? null : {
+      ubuntu: 'sudo apt-get install ghostscript',
+      macos: 'brew install ghostscript',
+      windows: 'Download from https://ghostscript.com/releases/gsdnld.html'
+    }
+  });
+});
+
+/**
+ * Compress a single PDF file
+ * POST /api/pdf/compress
+ */
+router.post('/compress', pdfUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const available = await compressionService.isAvailable();
+    if (!available) {
+      fs.unlinkSync(req.file.path);
+      return res.status(503).json({ 
+        error: 'Compression service unavailable. Ghostscript is not installed.',
+        installInstructions: {
+          ubuntu: 'sudo apt-get install ghostscript',
+          macos: 'brew install ghostscript',
+          windows: 'Download from https://ghostscript.com/releases/gsdnld.html'
+        }
+      });
+    }
+
+    const { preset = 'ebook', targetSize } = req.body;
+    const originalSize = fs.statSync(req.file.path).size;
+
+    let result;
+    if (targetSize) {
+      result = await compressionService.compressToTargetSize(
+        req.file.path,
+        null,
+        parseInt(targetSize)
+      );
+    } else {
+      result = await compressionService.compressPdf(req.file.path, null, { preset });
+    }
+
+    if (result.success) {
+      // Send compressed file
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="compressed_${req.file.originalname}"`);
+      res.setHeader('X-Original-Size', originalSize);
+      res.setHeader('X-Compressed-Size', result.compressedSize);
+      res.setHeader('X-Compression-Ratio', result.reduction);
+      
+      const fileStream = fs.createReadStream(req.file.path);
+      fileStream.pipe(res);
+      
+      fileStream.on('end', () => {
+        // Clean up
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (e) {
+          // Ignore
+        }
+      });
+    } else {
+      fs.unlinkSync(req.file.path);
+      res.status(500).json({ error: result.error || 'Compression failed' });
+    }
+
+  } catch (error) {
+    console.error('Compression error:', error);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Compression failed: ' + error.message });
+  }
+});
+
+/**
+ * Analyze PDF for compression potential
+ * POST /api/pdf/compression/analyze
+ */
+router.post('/compression/analyze', pdfUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const available = await compressionService.isAvailable();
+    if (!available) {
+      const size = fs.statSync(req.file.path).size;
+      fs.unlinkSync(req.file.path);
+      return res.json({
+        available: false,
+        originalSize: size,
+        originalSizeFormatted: compressionService.formatBytes(size),
+        message: 'Ghostscript not installed - cannot analyze compression potential'
+      });
+    }
+
+    const analysis = await compressionService.analyzeCompression(req.file.path);
+    
+    // Clean up
+    fs.unlinkSync(req.file.path);
+
+    res.json({
+      available: true,
+      ...analysis
+    });
+
+  } catch (error) {
+    console.error('Analysis error:', error);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Analysis failed: ' + error.message });
   }
 });
 

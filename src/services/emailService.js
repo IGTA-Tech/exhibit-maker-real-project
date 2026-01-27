@@ -22,6 +22,15 @@ function escapeHtml(text) {
 }
 
 /**
+ * Format bytes to human readable string
+ */
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+/**
  * Get credentials from environment or file (same as googleDriveService)
  */
 function getCredentials() {
@@ -229,6 +238,150 @@ async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipF
 }
 
 /**
+ * Send email with download link (for large files)
+ */
+async function sendEmailWithDownloadLink(recipientEmail, subject, options = {}) {
+  const mail = await initializeEmail();
+
+  const {
+    downloadUrl,
+    fileName = 'Exhibit_Package.pdf',
+    fileSize = 0,
+    originalSize = 0,
+    expiresAt = null,
+    caseName = 'Your Documents',
+    totalExhibits = 0,
+    totalPages = 0,
+    compressionApplied = false,
+  } = options;
+
+  // Get sender email
+  let fromEmail = process.env.EMAIL_FROM || process.env.EMAIL_USER;
+  if (!fromEmail) {
+    const token = getToken();
+    fromEmail = token?.email || 'noreply@example.com';
+  }
+
+  // Calculate expiry text
+  let expiryText = '';
+  if (expiresAt) {
+    const expiryDate = new Date(expiresAt);
+    expiryText = `This link will expire on ${expiryDate.toLocaleDateString()} at ${expiryDate.toLocaleTimeString()}.`;
+  }
+
+  // Build HTML email
+  const htmlBody = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white; padding: 30px; border-radius: 12px 12px 0 0; text-align: center; }
+        .header h1 { margin: 0 0 10px 0; font-size: 24px; }
+        .header p { margin: 0; opacity: 0.9; }
+        .content { background: #ffffff; padding: 30px; border: 1px solid #e2e8f0; }
+        .stats { display: flex; justify-content: space-around; margin: 25px 0; padding: 20px; background: #f8fafc; border-radius: 8px; }
+        .stat { text-align: center; }
+        .stat-value { font-size: 28px; font-weight: 700; color: #2563eb; display: block; }
+        .stat-label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+        .download-section { text-align: center; margin: 30px 0; }
+        .download-btn { display: inline-block; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white !important; text-decoration: none; padding: 16px 40px; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4); }
+        .download-btn:hover { background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%); }
+        .file-info { background: #f1f5f9; padding: 15px; border-radius: 8px; margin: 20px 0; font-size: 14px; }
+        .file-info p { margin: 5px 0; }
+        .expiry-notice { background: #fef3c7; border: 1px solid #f59e0b; padding: 12px 15px; border-radius: 8px; margin: 20px 0; font-size: 14px; color: #92400e; }
+        .footer { background: #1e293b; color: #94a3b8; padding: 20px; text-align: center; border-radius: 0 0 12px 12px; font-size: 12px; }
+        .footer a { color: #60a5fa; text-decoration: none; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>📁 Your Exhibit Package is Ready!</h1>
+          <p>${escapeHtml(caseName)}</p>
+        </div>
+        
+        <div class="content">
+          <p>Your exhibit package has been generated and is ready for download.</p>
+          
+          <div class="stats">
+            <div class="stat">
+              <span class="stat-value">${totalExhibits || '—'}</span>
+              <span class="stat-label">Exhibits</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value">${totalPages || '—'}</span>
+              <span class="stat-label">Pages</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value">${formatBytes(fileSize)}</span>
+              <span class="stat-label">File Size</span>
+            </div>
+          </div>
+
+          <div class="download-section">
+            <a href="${escapeHtml(downloadUrl)}" class="download-btn">
+              ⬇️ Download Package
+            </a>
+          </div>
+
+          <div class="file-info">
+            <p><strong>File:</strong> ${escapeHtml(fileName)}</p>
+            <p><strong>Size:</strong> ${formatBytes(fileSize)}${compressionApplied && originalSize ? ` (compressed from ${formatBytes(originalSize)})` : ''}</p>
+            ${totalExhibits ? `<p><strong>Exhibits:</strong> ${totalExhibits}</p>` : ''}
+            ${totalPages ? `<p><strong>Total Pages:</strong> ${totalPages}</p>` : ''}
+          </div>
+
+          ${expiryText ? `
+          <div class="expiry-notice">
+            ⚠️ <strong>Important:</strong> ${expiryText} Please download your file before it expires.
+          </div>
+          ` : ''}
+
+          <p style="color: #64748b; font-size: 14px;">
+            If the button above doesn't work, copy and paste this link into your browser:<br>
+            <a href="${escapeHtml(downloadUrl)}" style="color: #2563eb; word-break: break-all;">${escapeHtml(downloadUrl)}</a>
+          </p>
+        </div>
+
+        <div class="footer">
+          <p>Generated by Exhibit Maker</p>
+          <p>This is an automated message. Please do not reply directly to this email.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const mailOptions = {
+    from: fromEmail,
+    to: recipientEmail,
+    subject: subject,
+    html: htmlBody,
+  };
+
+  if (process.env.EMAIL_REPLY_TO) {
+    mailOptions.replyTo = process.env.EMAIL_REPLY_TO;
+  }
+
+  try {
+    const info = await mail.sendMail(mailOptions);
+    return {
+      success: true,
+      messageId: info.messageId,
+      response: info.response,
+      method: 'download_link'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
  * Generate HTML email body with XSS protection
  */
 function generateEmailHtml(results, folderName) {
@@ -385,7 +538,9 @@ module.exports = {
   isConfigured,
   createZipFromPdfs,
   sendEmailWithZip,
+  sendEmailWithDownloadLink,
   sendPdfsViaEmail,
   generateEmailHtml,
-  escapeHtml
+  escapeHtml,
+  formatBytes
 };

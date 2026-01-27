@@ -276,6 +276,65 @@ async function convertMultipleUrls(urls, options = {}, onProgress = null) {
 }
 
 /**
+ * Convert URL to PDF with retry logic
+ * @param {string} url - The URL to convert
+ * @param {object} options - Conversion options
+ * @param {number} maxRetries - Maximum retry attempts
+ * @returns {Promise<object>} - Result with PDF buffer
+ */
+async function convertUrlToPdfWithRetry(url, options = {}, maxRetries = 3) {
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await convertUrlToPdf(url, options);
+      
+      if (result.success) {
+        return result;
+      }
+      
+      lastError = result.error;
+      console.log(`Attempt ${attempt}/${maxRetries} failed for ${url}: ${result.error}`);
+      
+      // Don't retry on certain errors
+      if (result.error && (
+        result.error.includes('net::ERR_NAME_NOT_RESOLVED') ||
+        result.error.includes('net::ERR_CONNECTION_REFUSED') ||
+        result.error.includes('invalid URL')
+      )) {
+        return result; // Don't retry DNS/connection errors
+      }
+      
+    } catch (error) {
+      lastError = error.message;
+      console.log(`Attempt ${attempt}/${maxRetries} threw error for ${url}: ${error.message}`);
+    }
+    
+    // Wait before retry with exponential backoff
+    if (attempt < maxRetries) {
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+      console.log(`Waiting ${delay}ms before retry...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      
+      // Try to get a fresh browser on retry
+      if (attempt >= 2) {
+        try {
+          await closeBrowser();
+        } catch (e) {
+          // Ignore close errors
+        }
+      }
+    }
+  }
+  
+  return {
+    success: false,
+    error: lastError || 'Max retries exceeded',
+    sourceUrl: url,
+  };
+}
+
+/**
  * Check if a PDF is encrypted/protected
  * @param {Buffer} pdfBuffer - PDF buffer to check
  * @returns {Promise<boolean>} - True if encrypted
@@ -344,6 +403,7 @@ process.on('SIGTERM', async () => {
 
 module.exports = {
   convertUrlToPdf,
+  convertUrlToPdfWithRetry,
   convertHtmlToPdf,
   convertMultipleUrls,
   isPdfEncrypted,

@@ -1,356 +1,274 @@
 /**
- * PDF Service - Using Puppeteer for URL to PDF conversion
- * Self-hosted solution - no external API required
+ * PDF Generation Service using Puppeteer
+ * Converts URLs and HTML to PDF using headless Chrome
+ * Works on both local development and cloud environments (Railway, Render, etc.)
  */
 
-const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const { PDFDocument } = require('pdf-lib');
 
-// Browser instance (reused for performance)
-let browserInstance = null;
-let browserLaunchPromise = null;
+// Determine environment
+const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT;
+
+let browser = null;
+let puppeteer = null;
+let chromium = null;
+
+/**
+ * Initialize Puppeteer with the right browser for the environment
+ */
+async function initBrowser() {
+  if (browser) return browser;
+
+  try {
+    if (isProduction) {
+      // Production: Use puppeteer-core with @sparticuz/chromium
+      puppeteer = require('puppeteer-core');
+      chromium = require('@sparticuz/chromium');
+      
+      // Configure chromium for serverless
+      chromium.setHeadlessMode = true;
+      chromium.setGraphicsMode = false;
+      
+      browser = await puppeteer.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+        ignoreHTTPSErrors: true,
+      });
+      
+      console.log('Puppeteer initialized with @sparticuz/chromium (production mode)');
+    } else {
+      // Development: Use regular puppeteer with bundled Chrome
+      puppeteer = require('puppeteer');
+      
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--window-size=1920,1080',
+        ],
+        defaultViewport: {
+          width: 1920,
+          height: 1080,
+        },
+      });
+      
+      console.log('Puppeteer initialized with bundled Chrome (development mode)');
+    }
+
+    // Handle browser disconnection
+    browser.on('disconnected', () => {
+      console.log('Browser disconnected, will reinitialize on next request');
+      browser = null;
+    });
+
+    return browser;
+  } catch (error) {
+    console.error('Failed to initialize browser:', error.message);
+    throw error;
+  }
+}
 
 /**
  * Get or create browser instance
  */
 async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
+  if (!browser || !browser.isConnected()) {
+    browser = await initBrowser();
   }
-
-  // Prevent multiple simultaneous launches
-  if (browserLaunchPromise) {
-    return browserLaunchPromise;
-  }
-
-  browserLaunchPromise = puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-default-apps',
-      '--disable-sync',
-      '--disable-translate',
-      '--metrics-recording-only',
-      '--mute-audio',
-      '--safebrowsing-disable-auto-update',
-    ],
-  });
-
-  browserInstance = await browserLaunchPromise;
-  browserLaunchPromise = null;
-
-  // Handle browser disconnect
-  browserInstance.on('disconnected', () => {
-    browserInstance = null;
-  });
-
-  return browserInstance;
+  return browser;
 }
 
 /**
- * Close browser instance (call on shutdown)
+ * Close browser instance
  */
 async function closeBrowser() {
-  if (browserInstance) {
-    await browserInstance.close();
-    browserInstance = null;
+  if (browser) {
+    await browser.close();
+    browser = null;
+    console.log('Browser closed');
   }
 }
 
 /**
- * Check if PDF conversion is available (always true with Puppeteer)
+ * Convert a URL to PDF
+ * @param {string} url - The URL to convert
+ * @param {object} options - Conversion options
+ * @returns {Promise<object>} - Result with PDF buffer
  */
-function isApiConfigured() {
-  return true; // Puppeteer doesn't need external API
-}
+async function convertUrlToPdf(url, options = {}) {
+  const {
+    timeout = 60000,
+    waitUntil = 'networkidle2',
+    format = 'Letter',
+    margin = { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
+    printBackground = true,
+    scale = 1,
+    landscape = false,
+    waitForSelector = null,
+    delay = 1000, // Wait after page load for dynamic content
+  } = options;
 
-// Common errors that indicate retry might help
-const RETRYABLE_ERRORS = [
-  'ETIMEDOUT',
-  'ECONNRESET',
-  'ECONNREFUSED',
-  'timeout',
-  'Navigation timeout',
-  'net::ERR_',
-  'Protocol error',
-];
-
-/**
- * Sleep for specified milliseconds
- */
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Check if error is retryable
- */
-function isRetryableError(error) {
-  const errorStr = String(error).toLowerCase();
-  return RETRYABLE_ERRORS.some(e => errorStr.toLowerCase().includes(e.toLowerCase()));
-}
-
-/**
- * Convert a single URL to PDF using Puppeteer
- */
-async function convertUrlToPdf(url, fileName, options = {}) {
   let page = null;
   
   try {
-    const browser = await getBrowser();
-    page = await browser.newPage();
+    const browserInstance = await getBrowser();
+    page = await browserInstance.newPage();
 
     // Set viewport
-    await page.setViewport({
-      width: parseInt(options.width) || 1920,
-      height: parseInt(options.height) || 1080,
-    });
+    await page.setViewport({ width: 1920, height: 1080 });
 
-    // Set user agent
+    // Set user agent to avoid bot detection
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
 
-    // Set timeout
-    const timeout = options.timeout || 60000;
-    page.setDefaultNavigationTimeout(timeout);
-    page.setDefaultTimeout(timeout);
-
     // Navigate to URL
+    console.log(`Converting URL to PDF: ${url}`);
     await page.goto(url, {
-      waitUntil: ['load', 'domcontentloaded', 'networkidle2'],
+      waitUntil: waitUntil,
       timeout: timeout,
     });
 
-    // Optional delay to allow dynamic content to load
-    const delay = options.delay || 2000;
+    // Wait for specific selector if provided
+    if (waitForSelector) {
+      await page.waitForSelector(waitForSelector, { timeout: 10000 }).catch(() => {
+        console.log(`Selector ${waitForSelector} not found, continuing anyway`);
+      });
+    }
+
+    // Additional delay for dynamic content
     if (delay > 0) {
-      await sleep(delay);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
 
     // Generate PDF
     const pdfBuffer = await page.pdf({
-      format: options.format || 'A4',
-      printBackground: true,
-      margin: {
-        top: options.marginTop || '10mm',
-        right: options.marginRight || '10mm',
-        bottom: options.marginBottom || '10mm',
-        left: options.marginLeft || '10mm',
-      },
-      displayHeaderFooter: options.displayHeaderFooter || false,
-      preferCSSPageSize: true,
+      format: format,
+      margin: margin,
+      printBackground: printBackground,
+      scale: scale,
+      landscape: landscape,
+      preferCSSPageSize: false,
+    });
+
+    // Get page title for filename
+    const title = await page.title();
+    const sanitizedTitle = title
+      ? title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)
+      : 'document';
+
+    return {
+      success: true,
+      pdfBuffer: pdfBuffer,
+      fileName: `${sanitizedTitle}.pdf`,
+      pageTitle: title,
+      sourceUrl: url,
+    };
+
+  } catch (error) {
+    console.error(`Failed to convert URL ${url}:`, error.message);
+    return {
+      success: false,
+      error: error.message,
+      sourceUrl: url,
+    };
+  } finally {
+    if (page) {
+      await page.close().catch(() => {});
+    }
+  }
+}
+
+/**
+ * Convert HTML string to PDF
+ * @param {string} html - HTML content
+ * @param {object} options - Conversion options
+ * @returns {Promise<object>} - Result with PDF buffer
+ */
+async function convertHtmlToPdf(html, options = {}) {
+  const {
+    format = 'Letter',
+    margin = { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
+    printBackground = true,
+    scale = 1,
+    landscape = false,
+  } = options;
+
+  let page = null;
+
+  try {
+    const browserInstance = await getBrowser();
+    page = await browserInstance.newPage();
+
+    await page.setContent(html, {
+      waitUntil: 'networkidle0',
+    });
+
+    const pdfBuffer = await page.pdf({
+      format: format,
+      margin: margin,
+      printBackground: printBackground,
+      scale: scale,
+      landscape: landscape,
     });
 
     return {
       success: true,
       pdfBuffer: pdfBuffer,
-      fileName: fileName,
     };
 
   } catch (error) {
-    console.error(`Error converting ${url}:`, error.message);
+    console.error('Failed to convert HTML to PDF:', error.message);
     return {
       success: false,
       error: error.message,
-      fileName: fileName,
-      retryable: isRetryableError(error.message),
     };
   } finally {
     if (page) {
-      try {
-        await page.close();
-      } catch (e) {
-        // Ignore close errors
-      }
+      await page.close().catch(() => {});
     }
   }
 }
 
 /**
- * Convert URL with retry logic
+ * Convert multiple URLs to PDFs
+ * @param {string[]} urls - Array of URLs
+ * @param {object} options - Conversion options
+ * @param {function} onProgress - Progress callback
+ * @returns {Promise<object[]>} - Array of results
  */
-async function convertUrlToPdfWithRetry(url, fileName, options = {}, maxRetries = 3) {
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const result = await convertUrlToPdf(url, fileName, options);
-
-    if (result.success) {
-      return result;
-    }
-
-    lastError = result.error;
-
-    // Don't retry if not a retryable error
-    if (!result.retryable) {
-      return result;
-    }
-
-    // Don't sleep after the last attempt
-    if (attempt < maxRetries) {
-      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-      console.log(`Retry ${attempt}/${maxRetries} for ${fileName} after ${delay}ms`);
-      await sleep(delay);
-    }
-  }
-
-  return { success: false, error: lastError || 'Max retries exceeded', fileName };
-}
-
-/**
- * Download PDF from URL to local file (kept for compatibility, but now we generate directly)
- */
-async function downloadPdf(pdfUrl, localPath) {
-  // This function is kept for API compatibility but is not needed with Puppeteer
-  // since we generate the PDF buffer directly
-  throw new Error('downloadPdf is deprecated - use convertUrlToPdf which returns buffer directly');
-}
-
-/**
- * Download PDF with retry logic (kept for compatibility)
- */
-async function downloadPdfWithRetry(pdfUrl, localPath, maxRetries = 3) {
-  throw new Error('downloadPdfWithRetry is deprecated - use convertUrlToPdfWithRetry which returns buffer directly');
-}
-
-/**
- * Check if PDF is encrypted/password protected
- */
-async function isPdfEncrypted(filePath) {
-  try {
-    const buffer = fs.readFileSync(filePath);
-    const content = buffer.toString('latin1');
-
-    // Check for encryption dictionary
-    if (content.includes('/Encrypt')) {
-      return true;
-    }
-
-    return false;
-  } catch (error) {
-    console.error('Error checking PDF encryption:', error.message);
-    return false;
-  }
-}
-
-/**
- * Process multiple URLs with rate limiting
- */
-async function processUrls(urls, outputDir, onProgress) {
-  const results = {
-    success: [],
-    failed: [],
-    skipped: [],
-    total: urls.length
-  };
-
-  const batchSize = 3; // Lower batch size for Puppeteer (memory considerations)
-  const delayBetweenBatches = 1000;
-
-  for (let i = 0; i < urls.length; i += batchSize) {
-    const batch = urls.slice(i, i + batchSize);
-    const batchNumber = Math.floor(i / batchSize) + 1;
-    const totalBatches = Math.ceil(urls.length / batchSize);
-
+async function convertMultipleUrls(urls, options = {}, onProgress = null) {
+  const results = [];
+  
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    
     if (onProgress) {
       onProgress({
-        type: 'batch',
-        current: batchNumber,
-        total: totalBatches,
-        processed: i,
-        totalUrls: urls.length
+        current: i + 1,
+        total: urls.length,
+        url: url,
+        status: 'processing',
       });
     }
 
-    // Process batch sequentially to avoid memory issues
-    for (let idx = 0; idx < batch.length; idx++) {
-      const item = batch[idx];
-      const index = i + idx + 1;
-      const fileName = item.fileName || `PDF_${String(index).padStart(3, '0')}.pdf`;
+    const result = await convertUrlToPdf(url, options);
+    results.push({
+      ...result,
+      index: i,
+    });
 
-      try {
-        // Convert URL to PDF with retry
-        const result = await convertUrlToPdfWithRetry(item.url, fileName);
-
-        if (result.success && result.pdfBuffer) {
-          // Save the PDF to local file
-          const localPath = path.join(outputDir, fileName);
-          fs.writeFileSync(localPath, result.pdfBuffer);
-
-          // Check if PDF is encrypted
-          if (await isPdfEncrypted(localPath)) {
-            results.skipped.push({
-              index,
-              url: item.url,
-              fileName,
-              localPath,
-              reason: 'PDF is encrypted/password protected',
-              label: item.label || ''
-            });
-
-            if (onProgress) {
-              onProgress({
-                type: 'skipped',
-                index,
-                fileName,
-                url: item.url,
-                reason: 'Encrypted PDF'
-              });
-            }
-          } else {
-            results.success.push({
-              index,
-              url: item.url,
-              fileName,
-              localPath,
-              label: item.label || ''
-            });
-
-            if (onProgress) {
-              onProgress({ type: 'success', index, fileName, url: item.url });
-            }
-          }
-        } else {
-          results.failed.push({
-            index,
-            url: item.url,
-            fileName,
-            error: result.error,
-            label: item.label || ''
-          });
-
-          if (onProgress) {
-            onProgress({ type: 'failed', index, fileName, url: item.url, error: result.error });
-          }
-        }
-      } catch (error) {
-        results.failed.push({
-          index,
-          url: item.url,
-          fileName,
-          error: error.message,
-          label: item.label || ''
-        });
-
-        if (onProgress) {
-          onProgress({ type: 'failed', index, fileName, url: item.url, error: error.message });
-        }
-      }
-    }
-
-    // Delay between batches (except for last batch)
-    if (i + batchSize < urls.length) {
-      await sleep(delayBetweenBatches);
+    // Small delay between conversions to avoid overwhelming the browser
+    if (i < urls.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
 
@@ -358,120 +276,80 @@ async function processUrls(urls, outputDir, onProgress) {
 }
 
 /**
- * Parse URLs from various input formats
+ * Check if a PDF is encrypted/protected
+ * @param {Buffer} pdfBuffer - PDF buffer to check
+ * @returns {Promise<boolean>} - True if encrypted
  */
-function parseUrls(input, format = 'text') {
-  const urls = [];
-
-  if (format === 'json') {
-    try {
-      const data = JSON.parse(input);
-      if (Array.isArray(data)) {
-        data.forEach((item, idx) => {
-          if (typeof item === 'string') {
-            if (isValidUrl(item)) {
-              urls.push({ url: item, fileName: `PDF_${String(idx + 1).padStart(3, '0')}.pdf` });
-            }
-          } else if (item.url && isValidUrl(item.url)) {
-            urls.push({
-              url: item.url,
-              fileName: sanitizeFileName(item.fileName || item.name) || `PDF_${String(idx + 1).padStart(3, '0')}.pdf`,
-              label: item.label || item.description || ''
-            });
-          }
-        });
-      }
-    } catch (e) {
-      throw new Error('Invalid JSON format');
+async function isPdfEncrypted(pdfBuffer) {
+  try {
+    await PDFDocument.load(pdfBuffer);
+    return false;
+  } catch (error) {
+    if (error.message.includes('encrypted')) {
+      return true;
     }
-  } else {
-    // Text or CSV format - one URL per line
-    const lines = input.split(/[\r\n]+/).filter(line => line.trim());
-
-    lines.forEach((line, idx) => {
-      // Handle CSV with comma separation (url, label, filename)
-      const parts = line.split(',').map(p => p.trim());
-      const url = parts[0];
-
-      if (url && isValidUrl(url)) {
-        urls.push({
-          url: url,
-          label: parts[1] || '',
-          fileName: sanitizeFileName(parts[2]) || `PDF_${String(idx + 1).padStart(3, '0')}.pdf`
-        });
-      }
-    });
+    throw error;
   }
-
-  return urls;
 }
 
 /**
- * Validate URL format
+ * Get PDF page count
+ * @param {Buffer} pdfBuffer - PDF buffer
+ * @returns {Promise<number>} - Number of pages
  */
-function isValidUrl(string) {
+async function getPdfPageCount(pdfBuffer) {
   try {
-    const url = new URL(string);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
+    const pdfDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
+    return pdfDoc.getPageCount();
+  } catch (error) {
+    console.error('Failed to get page count:', error.message);
+    return 0;
+  }
+}
+
+/**
+ * Check if service is available
+ */
+async function isAvailable() {
+  try {
+    await getBrowser();
+    return true;
+  } catch (error) {
     return false;
   }
 }
 
 /**
- * Sanitize filename to prevent path traversal and invalid characters
+ * Get service status
  */
-function sanitizeFileName(fileName) {
-  if (!fileName) return null;
-
-  // Remove path traversal attempts
-  let sanitized = fileName.replace(/\.\./g, '').replace(/[/\\]/g, '');
-
-  // Remove invalid characters
-  sanitized = sanitized.replace(/[<>:"|?*]/g, '_');
-
-  // Limit length
-  if (sanitized.length > 200) {
-    const ext = path.extname(sanitized);
-    sanitized = sanitized.substring(0, 196) + ext;
-  }
-
-  // Ensure .pdf extension
-  if (!sanitized.toLowerCase().endsWith('.pdf')) {
-    sanitized += '.pdf';
-  }
-
-  return sanitized;
+async function getStatus() {
+  const available = await isAvailable();
+  return {
+    available,
+    environment: isProduction ? 'production' : 'development',
+    browserConnected: browser ? browser.isConnected() : false,
+  };
 }
 
 // Cleanup on process exit
-process.on('exit', () => {
-  if (browserInstance) {
-    browserInstance.close().catch(() => {});
-  }
-});
-
 process.on('SIGINT', async () => {
   await closeBrowser();
-  process.exit(0);
+  process.exit();
 });
 
 process.on('SIGTERM', async () => {
   await closeBrowser();
-  process.exit(0);
+  process.exit();
 });
 
 module.exports = {
   convertUrlToPdf,
-  convertUrlToPdfWithRetry,
-  downloadPdf,
-  downloadPdfWithRetry,
-  processUrls,
-  parseUrls,
+  convertHtmlToPdf,
+  convertMultipleUrls,
   isPdfEncrypted,
-  isValidUrl,
-  sanitizeFileName,
-  isApiConfigured,
+  getPdfPageCount,
+  isAvailable,
+  getStatus,
   closeBrowser,
   getBrowser,
 };

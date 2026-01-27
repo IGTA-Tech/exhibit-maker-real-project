@@ -1,8 +1,9 @@
 FROM node:20-slim
 
-# Install Chromium and dependencies
+# Install Chromium, Ghostscript and dependencies
 RUN apt-get update && apt-get install -y \
     chromium \
+    ghostscript \
     fonts-liberation \
     fonts-noto-color-emoji \
     libasound2 \

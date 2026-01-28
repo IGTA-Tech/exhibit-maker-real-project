@@ -25,13 +25,14 @@ function escapeHtml(text) {
  * Format bytes to human readable string
  */
 function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
 /**
- * Get credentials from environment or file (same as googleDriveService)
+ * Get credentials from environment or file
  */
 function getCredentials() {
   if (process.env.GOOGLE_CREDENTIALS_BASE64) {
@@ -79,7 +80,6 @@ function getToken() {
 
 /**
  * Initialize email transporter
- * Supports Gmail API (OAuth2) or regular SMTP
  */
 async function initializeEmail() {
   if (transporter) return transporter;
@@ -99,8 +99,6 @@ async function initializeEmail() {
       );
 
       oauth2Client.setCredentials(token);
-
-      // Get fresh access token
       const accessToken = await oauth2Client.getAccessToken();
 
       transporter = nodemailer.createTransport({
@@ -137,7 +135,6 @@ async function initializeEmail() {
     config.port = parseInt(process.env.EMAIL_PORT) || 587;
     config.secure = config.port === 465;
   } else {
-    // Default to Gmail
     config.service = 'gmail';
   }
 
@@ -154,55 +151,311 @@ function isConfigured() {
 }
 
 /**
- * Create a ZIP file from multiple PDFs
+ * Get the base email styles (shared between templates)
  */
-async function createZipFromPdfs(pdfFiles, outputPath, indexContent = null) {
-  return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(outputPath);
-    const archive = archiver('zip', { zlib: { level: 9 } });
-
-    output.on('close', () => {
-      resolve({
-        path: outputPath,
-        size: archive.pointer()
-      });
-    });
-
-    archive.on('error', reject);
-    archive.pipe(output);
-
-    // Add each PDF to the archive
-    for (const pdf of pdfFiles) {
-      if (fs.existsSync(pdf.localPath)) {
-        archive.file(pdf.localPath, { name: pdf.fileName });
-      }
+function getEmailStyles() {
+  return `
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; 
+      line-height: 1.6; 
+      color: #333; 
+      margin: 0; 
+      padding: 0; 
+      background-color: #f5f5f5;
     }
-
-    // Add index file if provided
-    if (indexContent) {
-      archive.append(indexContent, { name: 'INDEX.txt' });
+    .container { 
+      max-width: 600px; 
+      margin: 0 auto; 
+      padding: 20px; 
     }
-
-    archive.finalize();
-  });
+    .email-wrapper {
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .header { 
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); 
+      color: white; 
+      padding: 30px; 
+      text-align: center; 
+    }
+    .header-icon {
+      font-size: 48px;
+      margin-bottom: 10px;
+    }
+    .header h1 { 
+      margin: 0 0 10px 0; 
+      font-size: 24px; 
+      font-weight: 600;
+    }
+    .header p { 
+      margin: 0; 
+      opacity: 0.9; 
+      font-size: 14px;
+    }
+    .content { 
+      background: #ffffff; 
+      padding: 30px; 
+    }
+    .intro-text {
+      color: #4b5563;
+      font-size: 15px;
+      margin-bottom: 25px;
+    }
+    .stats { 
+      display: flex; 
+      justify-content: space-around; 
+      margin: 25px 0; 
+      padding: 20px; 
+      background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); 
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+    }
+    .stat { 
+      text-align: center;
+      padding: 10px;
+    }
+    .stat-value { 
+      font-size: 32px; 
+      font-weight: 700; 
+      color: #2563eb; 
+      display: block;
+      line-height: 1.2;
+    }
+    .stat-label { 
+      font-size: 11px; 
+      color: #64748b; 
+      text-transform: uppercase; 
+      letter-spacing: 0.5px;
+      margin-top: 5px;
+    }
+    .attachment-section {
+      text-align: center;
+      margin: 30px 0;
+      padding: 25px;
+      background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+      border-radius: 10px;
+      border: 2px dashed #10b981;
+    }
+    .attachment-icon {
+      font-size: 40px;
+      margin-bottom: 10px;
+    }
+    .attachment-text {
+      color: #047857;
+      font-weight: 600;
+      font-size: 16px;
+      margin: 0;
+    }
+    .attachment-hint {
+      color: #6b7280;
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    .download-section { 
+      text-align: center; 
+      margin: 30px 0; 
+    }
+    .download-btn { 
+      display: inline-block; 
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); 
+      color: white !important; 
+      text-decoration: none; 
+      padding: 16px 40px; 
+      border-radius: 8px; 
+      font-weight: 600; 
+      font-size: 16px; 
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4); 
+    }
+    .file-info { 
+      background: #f8fafc; 
+      padding: 20px; 
+      border-radius: 10px; 
+      margin: 20px 0;
+      border: 1px solid #e2e8f0;
+    }
+    .file-info-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #64748b;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+      font-weight: 600;
+    }
+    .file-info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .file-info-row:last-child {
+      border-bottom: none;
+    }
+    .file-info-label {
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .file-info-value {
+      color: #1f2937;
+      font-weight: 500;
+      font-size: 14px;
+    }
+    .success-badge {
+      display: inline-block;
+      background: #dcfce7;
+      color: #166534;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .expiry-notice { 
+      background: #fef3c7; 
+      border: 1px solid #f59e0b; 
+      padding: 15px 20px; 
+      border-radius: 10px; 
+      margin: 20px 0; 
+      font-size: 14px; 
+      color: #92400e; 
+    }
+    .expiry-notice strong {
+      color: #78350f;
+    }
+    .footer { 
+      background: #1e293b; 
+      color: #94a3b8; 
+      padding: 25px; 
+      text-align: center; 
+      font-size: 12px; 
+    }
+    .footer p {
+      margin: 5px 0;
+    }
+    .footer a { 
+      color: #60a5fa; 
+      text-decoration: none; 
+    }
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #e2e8f0, transparent);
+      margin: 25px 0;
+    }
+  `;
 }
 
 /**
- * Send email with ZIP attachment
+ * Send email with PDF attachment (beautiful template)
  */
-async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipFileName) {
+async function sendEmailWithAttachment(recipientEmail, subject, attachmentPath, attachmentName, options = {}) {
   const mail = await initializeEmail();
 
-  // Get sender email - prefer EMAIL_FROM, fallback to EMAIL_USER
+  const {
+    caseName = 'Your Documents',
+    fileSize = 0,
+    originalSize = 0,
+    totalExhibits = 0,
+    totalPages = 0,
+    compressionApplied = false,
+  } = options;
+
+  // Get sender email
   let fromEmail = process.env.EMAIL_FROM || process.env.EMAIL_USER;
   if (!fromEmail) {
     const token = getToken();
-    if (token) {
-      fromEmail = token.email || 'noreply@example.com';
-    } else {
-      fromEmail = 'noreply@example.com';
-    }
+    fromEmail = token?.email || 'noreply@example.com';
   }
+
+  // Build HTML email
+  const htmlBody = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Your Exhibit Package</title>
+      <style>${getEmailStyles()}</style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="email-wrapper">
+          <div class="header">
+            <div class="header-icon">📁</div>
+            <h1>Your Exhibit Package is Ready!</h1>
+            <p>${escapeHtml(caseName)}</p>
+          </div>
+          
+          <div class="content">
+            <p class="intro-text">
+              Great news! Your exhibit package has been generated successfully and is attached to this email.
+            </p>
+            
+            <div class="stats">
+              <div class="stat">
+                <span class="stat-value">${totalExhibits || '—'}</span>
+                <span class="stat-label">Exhibits</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value">${totalPages || '—'}</span>
+                <span class="stat-label">Pages</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value">${formatBytes(fileSize)}</span>
+                <span class="stat-label">File Size</span>
+              </div>
+            </div>
+
+            <div class="attachment-section">
+              <div class="attachment-icon">📎</div>
+              <p class="attachment-text">File Attached Below</p>
+              <p class="attachment-hint">Look for "${escapeHtml(attachmentName)}" in your email attachments</p>
+            </div>
+
+            <div class="file-info">
+              <div class="file-info-title">📋 Package Details</div>
+              <div class="file-info-row">
+                <span class="file-info-label">File Name</span>
+                <span class="file-info-value">${escapeHtml(attachmentName)}</span>
+              </div>
+              <div class="file-info-row">
+                <span class="file-info-label">File Size</span>
+                <span class="file-info-value">${formatBytes(fileSize)}${compressionApplied && originalSize ? ` <span class="success-badge">Compressed from ${formatBytes(originalSize)}</span>` : ''}</span>
+              </div>
+              ${totalExhibits ? `
+              <div class="file-info-row">
+                <span class="file-info-label">Total Exhibits</span>
+                <span class="file-info-value">${totalExhibits}</span>
+              </div>
+              ` : ''}
+              ${totalPages ? `
+              <div class="file-info-row">
+                <span class="file-info-label">Total Pages</span>
+                <span class="file-info-value">${totalPages}</span>
+              </div>
+              ` : ''}
+              <div class="file-info-row">
+                <span class="file-info-label">Status</span>
+                <span class="file-info-value"><span class="success-badge">✓ Ready to Download</span></span>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <p style="color: #6b7280; font-size: 13px; text-align: center;">
+              💡 <strong>Tip:</strong> If you don't see the attachment, check your spam folder or download it from your email provider's attachment viewer.
+            </p>
+          </div>
+
+          <div class="footer">
+            <p><strong>Exhibit Maker</strong></p>
+            <p>Professional PDF Generation & Exhibit Packaging</p>
+            <p style="margin-top: 15px; opacity: 0.7;">This is an automated message. Please do not reply directly to this email.</p>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
 
   const mailOptions = {
     from: fromEmail,
@@ -211,13 +464,12 @@ async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipF
     html: htmlBody,
     attachments: [
       {
-        filename: zipFileName,
-        path: zipPath
+        filename: attachmentName,
+        path: attachmentPath
       }
     ]
   };
 
-  // Add reply-to if configured
   if (process.env.EMAIL_REPLY_TO) {
     mailOptions.replyTo = process.env.EMAIL_REPLY_TO;
   }
@@ -227,7 +479,8 @@ async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipF
     return {
       success: true,
       messageId: info.messageId,
-      response: info.response
+      response: info.response,
+      method: 'attachment'
     };
   } catch (error) {
     return {
@@ -264,9 +517,11 @@ async function sendEmailWithDownloadLink(recipientEmail, subject, options = {}) 
 
   // Calculate expiry text
   let expiryText = '';
+  let expiryDate = '';
   if (expiresAt) {
-    const expiryDate = new Date(expiresAt);
-    expiryText = `This link will expire on ${expiryDate.toLocaleDateString()} at ${expiryDate.toLocaleTimeString()}.`;
+    const expiry = new Date(expiresAt);
+    expiryDate = expiry.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    expiryText = `This download link will expire on ${expiryDate}.`;
   }
 
   // Build HTML email
@@ -274,80 +529,93 @@ async function sendEmailWithDownloadLink(recipientEmail, subject, options = {}) 
     <!DOCTYPE html>
     <html>
     <head>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white; padding: 30px; border-radius: 12px 12px 0 0; text-align: center; }
-        .header h1 { margin: 0 0 10px 0; font-size: 24px; }
-        .header p { margin: 0; opacity: 0.9; }
-        .content { background: #ffffff; padding: 30px; border: 1px solid #e2e8f0; }
-        .stats { display: flex; justify-content: space-around; margin: 25px 0; padding: 20px; background: #f8fafc; border-radius: 8px; }
-        .stat { text-align: center; }
-        .stat-value { font-size: 28px; font-weight: 700; color: #2563eb; display: block; }
-        .stat-label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
-        .download-section { text-align: center; margin: 30px 0; }
-        .download-btn { display: inline-block; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white !important; text-decoration: none; padding: 16px 40px; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4); }
-        .download-btn:hover { background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%); }
-        .file-info { background: #f1f5f9; padding: 15px; border-radius: 8px; margin: 20px 0; font-size: 14px; }
-        .file-info p { margin: 5px 0; }
-        .expiry-notice { background: #fef3c7; border: 1px solid #f59e0b; padding: 12px 15px; border-radius: 8px; margin: 20px 0; font-size: 14px; color: #92400e; }
-        .footer { background: #1e293b; color: #94a3b8; padding: 20px; text-align: center; border-radius: 0 0 12px 12px; font-size: 12px; }
-        .footer a { color: #60a5fa; text-decoration: none; }
-      </style>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Your Exhibit Package</title>
+      <style>${getEmailStyles()}</style>
     </head>
     <body>
       <div class="container">
-        <div class="header">
-          <h1>📁 Your Exhibit Package is Ready!</h1>
-          <p>${escapeHtml(caseName)}</p>
-        </div>
-        
-        <div class="content">
-          <p>Your exhibit package has been generated and is ready for download.</p>
+        <div class="email-wrapper">
+          <div class="header">
+            <div class="header-icon">📁</div>
+            <h1>Your Exhibit Package is Ready!</h1>
+            <p>${escapeHtml(caseName)}</p>
+          </div>
           
-          <div class="stats">
-            <div class="stat">
-              <span class="stat-value">${totalExhibits || '—'}</span>
-              <span class="stat-label">Exhibits</span>
+          <div class="content">
+            <p class="intro-text">
+              Great news! Your exhibit package has been generated and is ready for download.
+            </p>
+            
+            <div class="stats">
+              <div class="stat">
+                <span class="stat-value">${totalExhibits || '—'}</span>
+                <span class="stat-label">Exhibits</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value">${totalPages || '—'}</span>
+                <span class="stat-label">Pages</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value">${formatBytes(fileSize)}</span>
+                <span class="stat-label">File Size</span>
+              </div>
             </div>
-            <div class="stat">
-              <span class="stat-value">${totalPages || '—'}</span>
-              <span class="stat-label">Pages</span>
+
+            <div class="download-section">
+              <a href="${escapeHtml(downloadUrl)}" class="download-btn">
+                ⬇️ Download Package
+              </a>
             </div>
-            <div class="stat">
-              <span class="stat-value">${formatBytes(fileSize)}</span>
-              <span class="stat-label">File Size</span>
+
+            <div class="file-info">
+              <div class="file-info-title">📋 Package Details</div>
+              <div class="file-info-row">
+                <span class="file-info-label">File Name</span>
+                <span class="file-info-value">${escapeHtml(fileName)}</span>
+              </div>
+              <div class="file-info-row">
+                <span class="file-info-label">File Size</span>
+                <span class="file-info-value">${formatBytes(fileSize)}${compressionApplied && originalSize ? ` <span class="success-badge">Compressed from ${formatBytes(originalSize)}</span>` : ''}</span>
+              </div>
+              ${totalExhibits ? `
+              <div class="file-info-row">
+                <span class="file-info-label">Total Exhibits</span>
+                <span class="file-info-value">${totalExhibits}</span>
+              </div>
+              ` : ''}
+              ${totalPages ? `
+              <div class="file-info-row">
+                <span class="file-info-label">Total Pages</span>
+                <span class="file-info-value">${totalPages}</span>
+              </div>
+              ` : ''}
+              <div class="file-info-row">
+                <span class="file-info-label">Status</span>
+                <span class="file-info-value"><span class="success-badge">✓ Ready to Download</span></span>
+              </div>
             </div>
+
+            ${expiryText ? `
+            <div class="expiry-notice">
+              ⚠️ <strong>Important:</strong> ${expiryText} Please download your file before it expires.
+            </div>
+            ` : ''}
+
+            <div class="divider"></div>
+
+            <p style="color: #6b7280; font-size: 13px; text-align: center;">
+              If the button above doesn't work, copy and paste this link into your browser:<br>
+              <a href="${escapeHtml(downloadUrl)}" style="color: #2563eb; word-break: break-all; font-size: 12px;">${escapeHtml(downloadUrl)}</a>
+            </p>
           </div>
 
-          <div class="download-section">
-            <a href="${escapeHtml(downloadUrl)}" class="download-btn">
-              ⬇️ Download Package
-            </a>
+          <div class="footer">
+            <p><strong>Exhibit Maker</strong></p>
+            <p>Professional PDF Generation & Exhibit Packaging</p>
+            <p style="margin-top: 15px; opacity: 0.7;">This is an automated message. Please do not reply directly to this email.</p>
           </div>
-
-          <div class="file-info">
-            <p><strong>File:</strong> ${escapeHtml(fileName)}</p>
-            <p><strong>Size:</strong> ${formatBytes(fileSize)}${compressionApplied && originalSize ? ` (compressed from ${formatBytes(originalSize)})` : ''}</p>
-            ${totalExhibits ? `<p><strong>Exhibits:</strong> ${totalExhibits}</p>` : ''}
-            ${totalPages ? `<p><strong>Total Pages:</strong> ${totalPages}</p>` : ''}
-          </div>
-
-          ${expiryText ? `
-          <div class="expiry-notice">
-            ⚠️ <strong>Important:</strong> ${expiryText} Please download your file before it expires.
-          </div>
-          ` : ''}
-
-          <p style="color: #64748b; font-size: 14px;">
-            If the button above doesn't work, copy and paste this link into your browser:<br>
-            <a href="${escapeHtml(downloadUrl)}" style="color: #2563eb; word-break: break-all;">${escapeHtml(downloadUrl)}</a>
-          </p>
-        </div>
-
-        <div class="footer">
-          <p>Generated by Exhibit Maker</p>
-          <p>This is an automated message. Please do not reply directly to this email.</p>
         </div>
       </div>
     </body>
@@ -382,81 +650,145 @@ async function sendEmailWithDownloadLink(recipientEmail, subject, options = {}) 
 }
 
 /**
- * Generate HTML email body with XSS protection
+ * Create a ZIP file from multiple PDFs
+ */
+async function createZipFromPdfs(pdfFiles, outputPath, indexContent = null) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(outputPath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    output.on('close', () => {
+      resolve({
+        path: outputPath,
+        size: archive.pointer()
+      });
+    });
+
+    archive.on('error', reject);
+    archive.pipe(output);
+
+    for (const pdf of pdfFiles) {
+      if (fs.existsSync(pdf.localPath)) {
+        archive.file(pdf.localPath, { name: pdf.fileName });
+      }
+    }
+
+    if (indexContent) {
+      archive.append(indexContent, { name: 'INDEX.txt' });
+    }
+
+    archive.finalize();
+  });
+}
+
+/**
+ * Legacy: Send email with ZIP attachment (basic template)
+ */
+async function sendEmailWithZip(recipientEmail, subject, htmlBody, zipPath, zipFileName) {
+  const mail = await initializeEmail();
+
+  let fromEmail = process.env.EMAIL_FROM || process.env.EMAIL_USER;
+  if (!fromEmail) {
+    const token = getToken();
+    fromEmail = token?.email || 'noreply@example.com';
+  }
+
+  const mailOptions = {
+    from: fromEmail,
+    to: recipientEmail,
+    subject: subject,
+    html: htmlBody,
+    attachments: [
+      {
+        filename: zipFileName,
+        path: zipPath
+      }
+    ]
+  };
+
+  if (process.env.EMAIL_REPLY_TO) {
+    mailOptions.replyTo = process.env.EMAIL_REPLY_TO;
+  }
+
+  try {
+    const info = await mail.sendMail(mailOptions);
+    return {
+      success: true,
+      messageId: info.messageId,
+      response: info.response
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Legacy: Generate HTML email body
  */
 function generateEmailHtml(results, folderName) {
   const successCount = results.success.length;
   const failedCount = results.failed.length;
   const totalCount = results.total;
-
-  // Escape user-provided content
   const safeFolderName = escapeHtml(folderName);
 
   let html = `
     <!DOCTYPE html>
     <html>
     <head>
-      <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background: #2563eb; color: white; padding: 20px; border-radius: 8px 8px 0 0; }
-        .content { background: #f8fafc; padding: 20px; border: 1px solid #e2e8f0; }
-        .stats { display: flex; gap: 20px; margin: 20px 0; }
-        .stat { background: white; padding: 15px; border-radius: 8px; text-align: center; flex: 1; }
-        .stat-number { font-size: 24px; font-weight: bold; }
-        .success { color: #16a34a; }
-        .failed { color: #dc2626; }
-        .footer { background: #1e293b; color: #94a3b8; padding: 15px; text-align: center; border-radius: 0 0 8px 8px; font-size: 12px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #e2e8f0; }
-        th { background: #e2e8f0; }
-        .url-cell { word-break: break-all; max-width: 250px; }
-      </style>
+      <style>${getEmailStyles()}</style>
     </head>
     <body>
       <div class="container">
-        <div class="header">
-          <h1 style="margin: 0;">Your PDFs are Ready!</h1>
-          <p style="margin: 10px 0 0 0; opacity: 0.9;">${safeFolderName}</p>
-        </div>
-        <div class="content">
-          <p>Your URL to PDF conversion is complete. Please find the attached ZIP file containing your PDFs.</p>
-
-          <div class="stats">
-            <div class="stat">
-              <div class="stat-number">${totalCount}</div>
-              <div>Total URLs</div>
-            </div>
-            <div class="stat">
-              <div class="stat-number success">${successCount}</div>
-              <div>Converted</div>
-            </div>
-            <div class="stat">
-              <div class="stat-number failed">${failedCount}</div>
-              <div>Failed</div>
-            </div>
+        <div class="email-wrapper">
+          <div class="header">
+            <h1>Your PDFs are Ready!</h1>
+            <p>${safeFolderName}</p>
           </div>
+          <div class="content">
+            <p class="intro-text">Your URL to PDF conversion is complete. Please find the attached ZIP file containing your PDFs.</p>
+            <div class="stats">
+              <div class="stat">
+                <span class="stat-value">${totalCount}</span>
+                <span class="stat-label">Total URLs</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value" style="color: #16a34a;">${successCount}</span>
+                <span class="stat-label">Converted</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value" style="color: #dc2626;">${failedCount}</span>
+                <span class="stat-label">Failed</span>
+              </div>
+            </div>
   `;
 
   if (failedCount > 0) {
     html += `
-          <h3>Failed Conversions:</h3>
-          <table>
-            <tr><th>#</th><th>URL</th><th>Error</th></tr>
+            <div class="file-info">
+              <div class="file-info-title">⚠️ Failed Conversions</div>
     `;
     results.failed.forEach(item => {
-      // Escape all user-provided content
       const safeUrl = escapeHtml(item.url.substring(0, 50));
       const safeError = escapeHtml(item.error);
-      html += `<tr><td>${item.index}</td><td class="url-cell">${safeUrl}...</td><td>${safeError}</td></tr>`;
+      html += `
+              <div class="file-info-row">
+                <span class="file-info-label">#${item.index}: ${safeUrl}...</span>
+                <span class="file-info-value" style="color: #dc2626;">${safeError}</span>
+              </div>
+      `;
     });
-    html += `</table>`;
+    html += `</div>`;
   }
 
   html += `
-        </div>
-        <div class="footer">
-          Generated by Exhibit Maker
+          </div>
+          <div class="footer">
+            <p><strong>Exhibit Maker</strong></p>
+            <p>This is an automated message.</p>
+          </div>
         </div>
       </div>
     </body>
@@ -478,8 +810,6 @@ async function sendPdfsViaEmail(pdfFiles, recipientEmail, folderName, results, i
   }
 
   const tempDir = path.join(__dirname, '../../temp');
-
-  // Ensure temp dir exists
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
   }
@@ -488,26 +818,21 @@ async function sendPdfsViaEmail(pdfFiles, recipientEmail, folderName, results, i
   const zipPath = path.join(tempDir, zipFileName);
 
   try {
-    // Create ZIP file
     console.log('Creating ZIP file...');
     const zip = await createZipFromPdfs(pdfFiles, zipPath, indexContent);
     console.log(`ZIP created: ${(zip.size / 1024 / 1024).toFixed(2)} MB`);
 
-    // Check file size (most email providers limit to 25MB)
-    const maxSize = 25 * 1024 * 1024; // 25MB
+    const maxSize = 25 * 1024 * 1024;
     if (zip.size > maxSize) {
-      // Clean up
       fs.unlinkSync(zipPath);
       return {
         success: false,
-        error: `ZIP file too large (${(zip.size / 1024 / 1024).toFixed(2)} MB). Maximum is 25MB. Consider using Google Drive delivery instead.`
+        error: `ZIP file too large (${(zip.size / 1024 / 1024).toFixed(2)} MB). Maximum is 25MB.`
       };
     }
 
-    // Generate email HTML
     const htmlBody = generateEmailHtml(results, folderName);
 
-    // Send email
     console.log(`Sending email to ${recipientEmail}...`);
     const emailResult = await sendEmailWithZip(
       recipientEmail,
@@ -517,12 +842,9 @@ async function sendPdfsViaEmail(pdfFiles, recipientEmail, folderName, results, i
       zipFileName
     );
 
-    // Clean up ZIP file
     fs.unlinkSync(zipPath);
-
     return emailResult;
   } catch (error) {
-    // Clean up on error
     if (fs.existsSync(zipPath)) {
       fs.unlinkSync(zipPath);
     }
@@ -538,6 +860,7 @@ module.exports = {
   isConfigured,
   createZipFromPdfs,
   sendEmailWithZip,
+  sendEmailWithAttachment,
   sendEmailWithDownloadLink,
   sendPdfsViaEmail,
   generateEmailHtml,

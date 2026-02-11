@@ -2,6 +2,7 @@
  * Visa Exhibit Maker - Frontend Application
  * Full-featured exhibit package generator with:
  * - PDF uploads
+ * - Image uploads (JPEG, JPG, PNG) - auto-converted to PDF
  * - URL to PDF conversion
  * - Drag-and-drop reordering
  * - Exhibit numbering (Letters, Numbers, Roman)
@@ -24,7 +25,7 @@ const state = {
 // Exhibit object structure:
 // {
 //   id: string,
-//   type: 'pdf' | 'url',
+//   type: 'pdf' | 'image' | 'url',
 //   file: File | null,
 //   url: string | null,
 //   label: string,
@@ -33,6 +34,16 @@ const state = {
 //   classification: string | null,
 //   confidence: number | null
 // }
+
+// Allowed file types
+const ALLOWED_FILE_TYPES = {
+  'application/pdf': 'pdf',
+  'image/jpeg': 'image',
+  'image/jpg': 'image',
+  'image/png': 'image',
+};
+
+const ALLOWED_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png'];
 
 // ============================================
 // Utility Functions
@@ -92,6 +103,35 @@ function toRoman(num) {
     }
   }
   return result;
+}
+
+function getFileExtension(filename) {
+  return '.' + filename.split('.').pop().toLowerCase();
+}
+
+function getFileTypeFromFile(file) {
+  // Check MIME type first
+  if (ALLOWED_FILE_TYPES[file.type]) {
+    return ALLOWED_FILE_TYPES[file.type];
+  }
+  // Fallback to extension check
+  const ext = getFileExtension(file.name);
+  if (['.jpg', '.jpeg', '.png'].includes(ext)) {
+    return 'image';
+  }
+  if (ext === '.pdf') {
+    return 'pdf';
+  }
+  return null;
+}
+
+function getFileIcon(type) {
+  switch (type) {
+    case 'pdf': return '📄';
+    case 'image': return '🖼️';
+    case 'url': return '🔗';
+    default: return '📎';
+  }
 }
 
 function showNotification(message, type = 'info') {
@@ -175,42 +215,50 @@ document.querySelectorAll('.upload-tab').forEach(tab => {
   });
 });
 
-// PDF file upload
-const pdfDropZone = document.getElementById('pdfDropZone');
-const pdfFilesInput = document.getElementById('pdfFiles');
+// File upload (PDFs + Images)
+const fileDropZone = document.getElementById('fileDropZone');
+const docFilesInput = document.getElementById('docFiles');
 
-pdfDropZone.addEventListener('dragover', (e) => {
+fileDropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
-  pdfDropZone.classList.add('dragover');
+  fileDropZone.classList.add('dragover');
 });
 
-pdfDropZone.addEventListener('dragleave', () => {
-  pdfDropZone.classList.remove('dragover');
+fileDropZone.addEventListener('dragleave', () => {
+  fileDropZone.classList.remove('dragover');
 });
 
-pdfDropZone.addEventListener('drop', (e) => {
+fileDropZone.addEventListener('drop', (e) => {
   e.preventDefault();
-  pdfDropZone.classList.remove('dragover');
-  handlePdfFiles(e.dataTransfer.files);
+  fileDropZone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
 });
 
-pdfFilesInput.addEventListener('change', (e) => {
-  handlePdfFiles(e.target.files);
+docFilesInput.addEventListener('change', (e) => {
+  handleFiles(e.target.files);
+  // Reset input so the same file can be selected again
+  e.target.value = '';
 });
 
-function handlePdfFiles(files) {
+function handleFiles(files) {
+  let addedCount = 0;
+  let skippedCount = 0;
+
   for (const file of files) {
-    if (file.type !== 'application/pdf') {
-      showNotification(`Skipping ${file.name} - not a PDF file`, 'error');
+    const fileType = getFileTypeFromFile(file);
+
+    if (!fileType) {
+      showNotification(`Skipping "${file.name}" — unsupported file type. Use PDF, JPEG, JPG, or PNG.`, 'error');
+      skippedCount++;
       continue;
     }
 
     const exhibit = {
       id: generateId(),
-      type: 'pdf',
+      type: fileType,       // 'pdf' or 'image'
       file: file,
       url: null,
-      label: file.name.replace(/\.pdf$/i, ''),
+      label: file.name.replace(/\.(pdf|jpe?g|png)$/i, ''),
       filename: file.name,
       size: file.size,
       classification: null,
@@ -218,11 +266,23 @@ function handlePdfFiles(files) {
     };
 
     state.exhibits.push(exhibit);
+    addedCount++;
   }
 
   updateFilesList();
   updateContinueButton();
-  showNotification(`Added ${files.length} PDF(s)`, 'success');
+
+  if (addedCount > 0) {
+    const types = [];
+    const pdfCount = Array.from(files).filter(f => getFileTypeFromFile(f) === 'pdf').length;
+    const imgCount = Array.from(files).filter(f => getFileTypeFromFile(f) === 'image').length;
+    if (pdfCount > 0) types.push(`${pdfCount} PDF(s)`);
+    if (imgCount > 0) types.push(`${imgCount} image(s)`);
+    showNotification(`Added ${types.join(' and ')}`, 'success');
+  }
+  if (skippedCount > 0 && addedCount === 0) {
+    showNotification('No supported files found. Please use PDF, JPEG, JPG, or PNG files.', 'error');
+  }
 }
 
 // URL input
@@ -325,13 +385,18 @@ function updateFilesList() {
   container.innerHTML = '';
 
   state.exhibits.forEach(exhibit => {
+    const icon = getFileIcon(exhibit.type);
+    const meta = exhibit.type === 'url'
+      ? escapeHtml(exhibit.url)
+      : `${formatFileSize(exhibit.size)}${exhibit.type === 'image' ? ' (will be converted to PDF)' : ''}`;
+
     const item = document.createElement('div');
     item.className = 'file-item';
     item.innerHTML = `
-      <span class="file-icon">${exhibit.type === 'pdf' ? '📄' : '🔗'}</span>
+      <span class="file-icon">${icon}</span>
       <div class="file-info">
         <div class="file-name">${escapeHtml(exhibit.label)}</div>
-        <div class="file-meta">${exhibit.type === 'pdf' ? formatFileSize(exhibit.size) : escapeHtml(exhibit.url)}</div>
+        <div class="file-meta">${meta}</div>
       </div>
       <button type="button" class="file-remove" onclick="removeExhibit('${exhibit.id}')">×</button>
     `;
@@ -367,10 +432,14 @@ function renderReviewList() {
     item.className = 'review-item';
     item.dataset.id = exhibit.id;
 
+    const sourceInfo = exhibit.type === 'url'
+      ? escapeHtml(exhibit.url)
+      : `${escapeHtml(exhibit.filename)}${exhibit.type === 'image' ? ' (image → PDF)' : ''}`;
+
     item.innerHTML = `
       <div class="review-number">${escapeHtml(exhibitNum)}</div>
       <div class="review-content">
-        <div class="review-filename">${exhibit.type === 'pdf' ? escapeHtml(exhibit.filename) : escapeHtml(exhibit.url)}</div>
+        <div class="review-filename">${sourceInfo}</div>
         <input type="text" class="review-label-input" value="${escapeHtml(exhibit.label)}"
                onchange="updateExhibitLabel('${exhibit.id}', this.value)"
                placeholder="Enter exhibit label...">
@@ -467,9 +536,9 @@ function updateExhibitClassification(id, classification) {
 
 function autoNameFromFilename() {
   state.exhibits.forEach(exhibit => {
-    if (exhibit.type === 'pdf') {
+    if (exhibit.type === 'pdf' || exhibit.type === 'image') {
       exhibit.label = exhibit.filename
-        .replace(/\.pdf$/i, '')
+        .replace(/\.(pdf|jpe?g|png)$/i, '')
         .replace(/[-_]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
@@ -486,10 +555,10 @@ async function runAiClassification() {
     return;
   }
 
-  // Only classify PDF exhibits (URLs would need to be converted first)
+  // Only classify PDF exhibits (images and URLs would need conversion first)
   const pdfExhibits = state.exhibits.filter(e => e.type === 'pdf' && e.file);
   if (pdfExhibits.length === 0) {
-    showNotification('No uploaded PDF files to classify', 'error');
+    showNotification('No uploaded PDF files to classify. AI classification works on PDF files only.', 'error');
     return;
   }
 
@@ -527,7 +596,6 @@ async function runAiClassification() {
     // Update exhibits with classification results
     if (result.classifications) {
       for (const classification of result.classifications) {
-        // Find exhibit by filename match
         const exhibit = pdfExhibits.find(e =>
           e.filename === classification.originalLabel ||
           e.label === classification.originalLabel
@@ -537,7 +605,6 @@ async function runAiClassification() {
           exhibit.classification = classification.criterion_name || null;
           exhibit.confidence = classification.confidence || null;
 
-          // Update label if AI suggested a better one
           if (classification.suggested_label && classification.suggested_label !== exhibit.label) {
             exhibit.aiSuggestedLabel = classification.suggested_label;
           }
@@ -583,6 +650,9 @@ function renderReorderList() {
 
   state.exhibits.forEach((exhibit, index) => {
     const exhibitNum = getExhibitNumber(index, numberingStyle);
+    const icon = getFileIcon(exhibit.type);
+    const sourceLabel = exhibit.type === 'image' ? '🖼️ Image' : (exhibit.type === 'pdf' ? '📄 PDF' : '🔗 URL');
+
     const item = document.createElement('div');
     item.className = 'reorder-item';
     item.dataset.id = exhibit.id;
@@ -591,7 +661,7 @@ function renderReorderList() {
       <span class="drag-handle">☰</span>
       <span class="reorder-number">Exhibit ${escapeHtml(exhibitNum)}</span>
       <span class="reorder-label">${escapeHtml(exhibit.label)}</span>
-      <span class="reorder-source">${exhibit.type === 'pdf' ? '📄 PDF' : '🔗 URL'}</span>
+      <span class="reorder-source">${sourceLabel}</span>
     `;
 
     container.appendChild(item);
@@ -608,18 +678,15 @@ function renderReorderList() {
     ghostClass: 'sortable-ghost',
     dragClass: 'sortable-drag',
     onEnd: function(evt) {
-      // Save history for undo
       state.orderHistory.push([...state.exhibits]);
       if (state.orderHistory.length > 10) {
         state.orderHistory.shift();
       }
       document.getElementById('undoBtn').disabled = false;
 
-      // Reorder exhibits array
       const movedItem = state.exhibits.splice(evt.oldIndex, 1)[0];
       state.exhibits.splice(evt.newIndex, 0, movedItem);
 
-      // Re-render to update numbers
       renderReorderList();
     }
   });
@@ -723,7 +790,7 @@ async function generatePackage() {
     // Add exhibits metadata
     const exhibitsData = state.exhibits.map((exhibit, index) => ({
       id: exhibit.id,
-      type: exhibit.type,
+      type: exhibit.type,  // 'pdf', 'image', or 'url'
       url: exhibit.url,
       label: exhibit.label,
       filename: exhibit.filename,
@@ -732,10 +799,10 @@ async function generatePackage() {
     }));
     formData.append('exhibits', JSON.stringify(exhibitsData));
 
-    // Add PDF files
+    // Add files (both PDFs and images)
     state.exhibits.forEach(exhibit => {
-      if (exhibit.type === 'pdf' && exhibit.file) {
-        formData.append('files', exhibit.file, exhibit.id + '.pdf');
+      if ((exhibit.type === 'pdf' || exhibit.type === 'image') && exhibit.file) {
+        formData.append('files', exhibit.file, exhibit.id + getFileExtension(exhibit.filename));
       }
     });
 
@@ -765,7 +832,7 @@ async function generatePackage() {
 }
 
 async function pollGenerationStatus(jobId) {
-  const maxAttempts = 300; // 10 minutes
+  const maxAttempts = 300;
   let attempts = 0;
 
   const poll = async () => {
@@ -855,7 +922,6 @@ function showComplete(job) {
     `;
   }
 
-  // Update download button
   const downloadBtn = document.getElementById('downloadBtn');
   if (job.downloadUrl) {
     downloadBtn.onclick = () => window.open(job.downloadUrl, '_blank');
@@ -872,13 +938,11 @@ function downloadPackage() {
 }
 
 function startNewCase() {
-  // Reset state
   state.exhibits = [];
   state.orderHistory = [];
   state.packageResult = null;
   state.currentStage = 1;
 
-  // Reset form
   document.getElementById('visaType').value = '';
   document.getElementById('numberingStyle').value = 'letters';
   document.getElementById('beneficiaryName').value = '';
@@ -888,12 +952,10 @@ function startNewCase() {
   document.getElementById('recipientEmail').value = '';
   document.getElementById('urlInput').value = '';
 
-  // Reset UI
   updateFilesList();
   document.getElementById('generateProgress').classList.add('hidden');
   document.getElementById('generateBtn').disabled = false;
 
-  // Go to stage 1
   goToStage(1);
   showNotification('Ready for new case', 'info');
 }
@@ -902,20 +964,17 @@ function startNewCase() {
 // Sidebar Events
 // ============================================
 
-// Show/hide email field based on delivery method
 document.getElementById('deliveryMethod').addEventListener('change', (e) => {
   const emailGroup = document.getElementById('emailGroup');
   emailGroup.style.display = e.target.value === 'email' || e.target.value === 'drive' ? 'block' : 'none';
 });
 
-// Update review list when visa type changes
 document.getElementById('visaType').addEventListener('change', () => {
   if (state.currentStage === 2) {
     renderReviewList();
   }
 });
 
-// Update numbering when style changes
 document.getElementById('numberingStyle').addEventListener('change', () => {
   if (state.currentStage === 2) {
     renderReviewList();
@@ -931,14 +990,12 @@ document.getElementById('numberingStyle').addEventListener('change', () => {
 // ============================================
 
 document.addEventListener('keydown', (e) => {
-  // Ctrl+Enter to continue to next stage
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     if (state.currentStage < 5 && state.exhibits.length > 0) {
       goToStage(state.currentStage + 1);
     }
   }
 
-  // Ctrl+Z to undo reorder
   if ((e.ctrlKey || e.metaKey) && e.key === 'z' && state.currentStage === 3) {
     undoReorder();
   }
@@ -956,7 +1013,6 @@ async function checkServiceConfig() {
     if (response.ok) {
       serviceConfig = await response.json();
 
-      // Warn if URL conversion is unavailable
       if (!serviceConfig.urlConversion) {
         const urlTab = document.querySelector('[data-upload-tab="url"]');
         if (urlTab) {
@@ -973,7 +1029,6 @@ async function checkServiceConfig() {
         }
       }
 
-      // Warn if email is unavailable
       if (!serviceConfig.email) {
         const emailOption = document.querySelector('#deliveryMethod option[value="email"]');
         if (emailOption) {
@@ -982,7 +1037,6 @@ async function checkServiceConfig() {
         }
       }
 
-      // Warn if Google Drive is unavailable
       if (!serviceConfig.googleDrive) {
         const driveOption = document.querySelector('#deliveryMethod option[value="drive"]');
         if (driveOption) {

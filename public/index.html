@@ -146,12 +146,12 @@
       <section class="stage-content active" id="stage-1">
         <div class="stage-header">
           <h2>Upload Documents</h2>
-          <p>Add PDFs, URLs, or import from Google Drive</p>
+          <p>Add PDFs, images, URLs, or import from Google Drive</p>
         </div>
 
         <div class="upload-tabs">
-          <button type="button" class="upload-tab active" data-upload-tab="pdf">
-            <span class="tab-icon">📄</span> Upload PDFs
+          <button type="button" class="upload-tab active" data-upload-tab="files">
+            <span class="tab-icon">📄</span> Upload Files
           </button>
           <button type="button" class="upload-tab" data-upload-tab="url">
             <span class="tab-icon">🔗</span> From URLs
@@ -161,14 +161,14 @@
           </button>
         </div>
 
-        <!-- PDF Upload -->
-        <div class="upload-content active" id="upload-pdf">
-          <div class="file-drop-zone" id="pdfDropZone">
-            <input type="file" id="pdfFiles" multiple accept=".pdf" hidden>
+        <!-- File Upload (PDFs + Images) -->
+        <div class="upload-content active" id="upload-files">
+          <div class="file-drop-zone" id="fileDropZone">
+            <input type="file" id="docFiles" multiple accept=".pdf,.jpg,.jpeg,.png" hidden>
             <div class="drop-icon">📁</div>
-            <h3>Drag & Drop PDFs Here</h3>
-            <p>or <button type="button" class="link-btn" onclick="document.getElementById('pdfFiles').click()">browse files</button></p>
-            <span class="hint">Supports multiple PDF files</span>
+            <h3>Drag & Drop Files Here</h3>
+            <p>or <button type="button" class="link-btn" onclick="document.getElementById('docFiles').click()">browse files</button></p>
+            <span class="hint">Supports PDF, JPEG, JPG, and PNG files. Images will be converted to PDF automatically.</span>
           </div>
         </div>
 

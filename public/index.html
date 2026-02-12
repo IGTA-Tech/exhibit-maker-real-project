@@ -175,15 +175,24 @@
         <!-- URL Input -->
         <div class="upload-content" id="upload-url">
           <div class="url-input-section">
-            <textarea id="urlInput" rows="8" placeholder="Paste URLs here (one per line)
+            <textarea id="urlInput" rows="10" placeholder="Paste your URLs here — any format works!
 
-Example:
+Examples of supported formats:
+
+AWARDS
+1. https://example.com/article — Award Certificate
+2. https://example.com/news — Media Coverage
+
+Plain URLs:
 https://example.com/document1
 https://example.com/document2
 
-Or with labels:
-https://example.com/doc1, Award Certificate
-https://example.com/doc2, Media Article"></textarea>
+With labels (comma, dash, or em-dash):
+https://example.com/doc1 — My Label
+https://example.com/doc2, Another Label
+https://example.com/doc3 - Some Description
+
+Section headers like AWARDS or MEMBERSHIP are skipped automatically."></textarea>
             <div class="url-actions">
               <span id="urlCount">0 URLs detected</span>
               <button type="button" class="btn btn-secondary" onclick="addUrlsToExhibits()">Add URLs</button>

@@ -148,6 +148,201 @@ function showNotification(message, type = 'info') {
 }
 
 // ============================================
+// URL Parsing (Robust / Flexible)
+// ============================================
+
+/**
+ * Extract ALL URLs from a line of text.
+ * Handles multiple URLs per line, including concatenated URLs with no space
+ * e.g. "https://a.com/pagehttps://b.com/page" → two separate URLs.
+ *
+ * Returns an array of valid URL strings (may be empty).
+ */
+function extractUrlsFromLine(line) {
+  if (!line || !line.includes('http')) return [];
+
+  // Split the line on every occurrence of http:// or https://
+  // This handles concatenated URLs like "https://a.comhttps://b.com"
+  // by re-inserting the protocol before each chunk.
+  const chunks = line.split(/(?=https?:\/\/)/gi);
+
+  const urls = [];
+
+  for (let chunk of chunks) {
+    // Extract the URL portion (stop at whitespace or known delimiters)
+    const urlMatch = chunk.match(/^(https?:\/\/[^\s,;""''<>\[\](){}]+)/i);
+    if (!urlMatch) continue;
+
+    let url = urlMatch[1];
+
+    // Clean trailing punctuation that isn't part of a URL
+    url = url.replace(/[.,;:!?)}\]]+$/, '');
+
+    // Validate
+    try {
+      new URL(url);
+      urls.push(url);
+    } catch {
+      // Skip invalid URLs
+    }
+  }
+
+  return urls;
+}
+
+/**
+ * Extract a label from the text surrounding a URL on its line.
+ * Handles formats like:
+ *   1. https://example.com — Some Label
+ *   https://example.com - Some Label
+ *   https://example.com, Some Label
+ *   3. https://example.com — Some Label — extra note
+ *   Some Label: https://example.com
+ */
+function extractLabelFromLine(line, url) {
+  if (!url) return '';
+
+  // Remove the URL from the line to work with the remaining text
+  let remaining = line.replace(url, '|||URL|||');
+
+  // Remove leading numbering like "1.", "2)", "12.", "#3", "- ", "* "
+  remaining = remaining.replace(/^\s*[\d#]+[.):\-]?\s*/, '');
+  // Remove bullet points
+  remaining = remaining.replace(/^\s*[-*•]\s*/, '');
+
+  // Split on the URL placeholder
+  const parts = remaining.split('|||URL|||');
+  const before = (parts[0] || '').trim();
+  const after = (parts[1] || '').trim();
+
+  // The label is usually AFTER the URL, separated by — , – , - , or ,
+  let label = '';
+
+  if (after) {
+    // Strip leading separators: — – - , : |
+    label = after.replace(/^[\s—–\-,;:|]+/, '').trim();
+  }
+
+  // If no label found after URL, check before URL
+  if (!label && before) {
+    label = before.replace(/[\s—–\-,;:|]+$/, '').trim();
+  }
+
+  // Clean up: remove quotes, extra whitespace
+  label = label.replace(/^["']+|["']+$/g, '').trim();
+  label = label.replace(/\s+/g, ' ');
+
+  return label;
+}
+
+/**
+ * Parse a block of user-pasted text into an array of {url, label} objects.
+ * Handles many real-world formats:
+ *   - Numbered lists (1. url — label)
+ *   - Bullet lists (- url — label)
+ *   - Plain URLs (one per line)
+ *   - CSV-style (url, label)
+ *   - Section headers (AWARDS, MEMBERSHIP, etc. — skipped)
+ *   - Mixed content with URLs embedded in sentences
+ *   - Multiple URLs on one line (including concatenated with no space)
+ */
+function parseUrlsFromText(text) {
+  if (!text || typeof text !== 'string') return [];
+
+  const lines = text.split(/\r?\n/);
+  const results = [];
+  let currentSection = ''; // Track section headers for context
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    // Skip empty lines
+    if (!line) continue;
+
+    // Detect section headers: lines that are ALL CAPS with no URL
+    // e.g. "AWARDS", "MEMBERSHIP", "PUBLISHED MATERIAL"
+    if (/^[A-Z][A-Z\s/&]+$/.test(line) && !line.includes('http')) {
+      currentSection = line;
+      continue;
+    }
+
+    // Extract all URLs from this line (handles concatenated URLs too)
+    const urls = extractUrlsFromLine(line);
+    if (urls.length === 0) continue;
+
+    if (urls.length === 1) {
+      // Single URL on the line — try to extract a label from surrounding text
+      let label = extractLabelFromLine(line, urls[0]);
+      if (!label) {
+        label = extractLabelFromUrl(urls[0]);
+      }
+      results.push({ url: urls[0], label });
+    } else {
+      // Multiple URLs on the same line — each gets its own entry
+      // Labels are derived from the URL path since there's no clear
+      // way to assign surrounding text to a specific URL
+      for (const url of urls) {
+        results.push({ url, label: extractLabelFromUrl(url) });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Count valid URLs in a text block (for the live counter).
+ */
+function countUrls(text) {
+  return parseUrlsFromText(text).length;
+}
+
+/**
+ * Add parsed URLs to the exhibits list.
+ */
+function addUrlsToExhibits() {
+  const text = urlInput.value.trim();
+  if (!text) {
+    showNotification('Please enter some URLs first', 'error');
+    return;
+  }
+
+  const parsed = parseUrlsFromText(text);
+
+  if (parsed.length === 0) {
+    showNotification('No valid URLs found in the input. Make sure each URL starts with http:// or https://', 'error');
+    return;
+  }
+
+  let added = 0;
+
+  for (const item of parsed) {
+    const exhibit = {
+      id: generateId(),
+      type: 'url',
+      file: null,
+      url: item.url,
+      label: item.label,
+      filename: `${item.label}.pdf`,
+      size: 0,
+      classification: null,
+      confidence: null
+    };
+
+    state.exhibits.push(exhibit);
+    added++;
+  }
+
+  if (added > 0) {
+    urlInput.value = '';
+    document.getElementById('urlCount').textContent = '0 URLs detected';
+    updateFilesList();
+    updateContinueButton();
+    showNotification(`Added ${added} URL(s) for conversion`, 'success');
+  }
+}
+
+// ============================================
 // Stage Navigation
 // ============================================
 
@@ -285,74 +480,13 @@ function handleFiles(files) {
   }
 }
 
-// URL input
+// URL input — live counter
 const urlInput = document.getElementById('urlInput');
 
 urlInput.addEventListener('input', () => {
   const count = countUrls(urlInput.value);
-  document.getElementById('urlCount').textContent = `${count} URLs detected`;
+  document.getElementById('urlCount').textContent = `${count} URL${count !== 1 ? 's' : ''} detected`;
 });
-
-function countUrls(text) {
-  const lines = text.split(/[\r\n]+/).filter(line => {
-    const url = line.split(',')[0].trim();
-    try {
-      new URL(url);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  return lines.length;
-}
-
-function addUrlsToExhibits() {
-  const text = urlInput.value.trim();
-  if (!text) {
-    showNotification('Please enter some URLs first', 'error');
-    return;
-  }
-
-  const lines = text.split(/[\r\n]+/).filter(line => line.trim());
-  let added = 0;
-
-  for (const line of lines) {
-    const parts = line.split(',').map(p => p.trim());
-    const url = parts[0];
-    const label = parts[1] || extractLabelFromUrl(url);
-
-    try {
-      new URL(url);
-    } catch {
-      continue;
-    }
-
-    const exhibit = {
-      id: generateId(),
-      type: 'url',
-      file: null,
-      url: url,
-      label: label,
-      filename: `${label}.pdf`,
-      size: 0,
-      classification: null,
-      confidence: null
-    };
-
-    state.exhibits.push(exhibit);
-    added++;
-  }
-
-  if (added > 0) {
-    urlInput.value = '';
-    document.getElementById('urlCount').textContent = '0 URLs detected';
-    updateFilesList();
-    updateContinueButton();
-    showNotification(`Added ${added} URL(s) for conversion`, 'success');
-  } else {
-    showNotification('No valid URLs found', 'error');
-  }
-}
 
 function extractLabelFromUrl(url) {
   try {

@@ -507,6 +507,7 @@ const driveState = {
   configured: false,
   clientId: null,
   apiKey: null,
+  appId: null,
   scope: null,
   accessToken: null,
   pickerLoaded: false,
@@ -531,10 +532,22 @@ async function initGoogleDrive() {
     driveState.configured = true;
     driveState.clientId = config.clientId;
     driveState.apiKey = config.apiKey;
+    driveState.appId = config.appId;
     driveState.scope = config.scope;
 
     // Load the Google API scripts
     await loadGoogleScripts();
+
+    // Check if we're returning from an OAuth redirect
+    const hasRedirectToken = checkOAuthRedirectReturn();
+    if (hasRedirectToken) {
+      // Restore exhibits and form config saved before redirect
+      restoreStateAfterRedirect();
+      renderDriveConnected();
+      // Small delay to ensure UI is ready, then auto-open picker
+      setTimeout(() => openGooglePicker(), 500);
+      return;
+    }
 
     // Show the "ready to connect" UI
     renderDriveReady();
@@ -605,25 +618,309 @@ function connectGoogleDrive() {
     return;
   }
 
-  // Request an access token via OAuth2 popup
-  if (!driveState.tokenClient) {
-    driveState.tokenClient = google.accounts.oauth2.initTokenClient({
-      client_id: driveState.clientId,
-      scope: driveState.scope,
-      callback: handleOAuthResponse,
-    });
-  }
-
   // If we already have a token, open the picker directly
   if (driveState.accessToken) {
     openGooglePicker();
-  } else {
-    driveState.tokenClient.requestAccessToken({ prompt: 'consent' });
+    return;
+  }
+
+  // Open OAuth in a popup and poll for the token
+  const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?' +
+    'client_id=' + encodeURIComponent(driveState.clientId) +
+    '&scope=' + encodeURIComponent(driveState.scope) +
+    '&response_type=token' +
+    '&redirect_uri=' + encodeURIComponent(window.location.origin + '/oauth-callback.html') +
+    '&include_granted_scopes=true' +
+    '&prompt=consent';
+
+  const popupWidth = 500;
+  const popupHeight = 650;
+  const left = window.screenX + (window.outerWidth - popupWidth) / 2;
+  const top = window.screenY + (window.outerHeight - popupHeight) / 2;
+  
+  const popup = window.open(
+    authUrl,
+    'googleDriveAuth',
+    `width=${popupWidth},height=${popupHeight},left=${left},top=${top},scrollbars=yes`
+  );
+
+  if (!popup) {
+    showNotification('Popup was blocked. Please allow popups for this site and try again.', 'error');
+    return;
+  }
+
+  // Clear any stale token
+  localStorage.removeItem('googleDriveToken');
+
+  // Poll localStorage for the token written by the popup callback page
+  // Parent is responsible for closing the popup after reading the token
+  const tokenPoll = setInterval(() => {
+    const token = localStorage.getItem('googleDriveToken');
+    
+    if (token) {
+      clearInterval(tokenPoll);
+      localStorage.removeItem('googleDriveToken');
+      
+      // Close the popup from the parent side
+      try { popup.close(); } catch(e) {}
+      
+      driveState.accessToken = token;
+      console.log('Google Drive token received');
+      renderDriveConnected();
+      openGooglePicker();
+      return;
+    }
+  }, 200);
+
+  // Stop polling after 60 seconds (timeout safety net)
+  setTimeout(() => {
+    clearInterval(tokenPoll);
+  }, 60000);
+}
+
+/**
+ * Redirect-based OAuth flow (fallback when popup is blocked by Chrome)
+ */
+async function connectGoogleDriveRedirect() {
+  // Save current state before redirecting
+  showNotification('Saving your work before connecting to Google Drive...', 'info');
+  await saveStateBeforeRedirect();
+  
+  const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?' +
+    'client_id=' + encodeURIComponent(driveState.clientId) +
+    '&scope=' + encodeURIComponent(driveState.scope) +
+    '&response_type=token' +
+    '&redirect_uri=' + encodeURIComponent(window.location.origin) +
+    '&include_granted_scopes=true' +
+    '&prompt=consent';
+  
+  window.location.href = authUrl;
+}
+
+/**
+ * Save all current exhibits and form config to sessionStorage before OAuth redirect
+ */
+async function saveStateBeforeRedirect() {
+  try {
+    // Save exhibits — convert File objects to base64 data URLs
+    const exhibitsToSave = [];
+    for (const exhibit of state.exhibits) {
+      const saved = {
+        id: exhibit.id,
+        type: exhibit.type,
+        url: exhibit.url,
+        label: exhibit.label,
+        filename: exhibit.filename,
+        size: exhibit.size,
+        classification: exhibit.classification,
+        confidence: exhibit.confidence,
+        serverFilename: exhibit.serverFilename || null,
+        driveImport: exhibit.driveImport || false,
+      };
+
+      // Convert File object to base64 for uploaded files
+      if (exhibit.file && exhibit.file instanceof File) {
+        try {
+          saved.fileData = await fileToBase64(exhibit.file);
+          saved.fileType = exhibit.file.type;
+          saved.fileName = exhibit.file.name;
+        } catch (e) {
+          console.warn('Could not save file data for:', exhibit.filename, e);
+        }
+      }
+      exhibitsToSave.push(saved);
+    }
+
+    sessionStorage.setItem('exhibitState', JSON.stringify(exhibitsToSave));
+
+    // Save URL input text (in case they typed but didn't click Add)
+    const urlInput = document.getElementById('urlInput');
+    if (urlInput && urlInput.value.trim()) {
+      sessionStorage.setItem('urlInputText', urlInput.value);
+    }
+
+    // Save form config
+    const formConfig = {
+      visaType: document.getElementById('visaType')?.value || '',
+      exhibitNumbering: document.getElementById('exhibitNumbering')?.value || '',
+      beneficiaryName: document.getElementById('beneficiaryName')?.value || '',
+      petitionerName: document.getElementById('petitionerName')?.value || '',
+      caseName: document.getElementById('caseName')?.value || '',
+    };
+    sessionStorage.setItem('formConfig', JSON.stringify(formConfig));
+    
+    // Mark that we should restore on next load
+    sessionStorage.setItem('driveOAuthPending', 'true');
+    
+    console.log(`Saved ${exhibitsToSave.length} exhibits to sessionStorage`);
+  } catch (e) {
+    console.error('Failed to save state:', e);
+    // If sessionStorage is full (large files), still proceed with redirect
+    showNotification('Some files may need to be re-added after connecting.', 'warning');
   }
 }
 
 /**
- * Handle OAuth2 token response
+ * Convert a File object to base64 data URL
+ */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Convert a base64 data URL back to a File object
+ */
+function base64ToFile(dataUrl, filename, mimeType) {
+  const arr = dataUrl.split(',');
+  const bstr = atob(arr[1]);
+  const u8arr = new Uint8Array(bstr.length);
+  for (let i = 0; i < bstr.length; i++) {
+    u8arr[i] = bstr.charCodeAt(i);
+  }
+  return new File([u8arr], filename, { type: mimeType });
+}
+
+/**
+ * Restore exhibits and form config from sessionStorage after OAuth redirect
+ */
+function restoreStateAfterRedirect() {
+  try {
+    // Restore form config first
+    const formConfigStr = sessionStorage.getItem('formConfig');
+    if (formConfigStr) {
+      const config = JSON.parse(formConfigStr);
+      if (config.visaType) {
+        const el = document.getElementById('visaType');
+        if (el) el.value = config.visaType;
+      }
+      if (config.exhibitNumbering) {
+        const el = document.getElementById('exhibitNumbering');
+        if (el) el.value = config.exhibitNumbering;
+      }
+      if (config.beneficiaryName) {
+        const el = document.getElementById('beneficiaryName');
+        if (el) el.value = config.beneficiaryName;
+      }
+      if (config.petitionerName) {
+        const el = document.getElementById('petitionerName');
+        if (el) el.value = config.petitionerName;
+      }
+      if (config.caseName) {
+        const el = document.getElementById('caseName');
+        if (el) el.value = config.caseName;
+      }
+    }
+
+    // Restore URL input text
+    const urlText = sessionStorage.getItem('urlInputText');
+    if (urlText) {
+      const urlInput = document.getElementById('urlInput');
+      if (urlInput) {
+        urlInput.value = urlText;
+        const count = countUrls(urlText);
+        document.getElementById('urlCount').textContent = `${count} URL${count !== 1 ? 's' : ''} detected`;
+      }
+    }
+
+    // Restore exhibits
+    const exhibitStr = sessionStorage.getItem('exhibitState');
+    if (exhibitStr) {
+      const savedExhibits = JSON.parse(exhibitStr);
+      let restoredCount = 0;
+      let fileFailCount = 0;
+
+      for (const saved of savedExhibits) {
+        const exhibit = {
+          id: saved.id || generateId(),
+          type: saved.type,
+          file: null,
+          url: saved.url,
+          label: saved.label,
+          filename: saved.filename,
+          size: saved.size,
+          classification: saved.classification,
+          confidence: saved.confidence,
+          serverFilename: saved.serverFilename || null,
+          driveImport: saved.driveImport || false,
+        };
+
+        // Restore File object from base64
+        if (saved.fileData) {
+          try {
+            exhibit.file = base64ToFile(saved.fileData, saved.fileName, saved.fileType);
+            exhibit.size = exhibit.file.size;
+          } catch (e) {
+            console.warn('Could not restore file:', saved.filename);
+            fileFailCount++;
+            continue; // Skip files that can't be restored
+          }
+        }
+
+        state.exhibits.push(exhibit);
+        restoredCount++;
+      }
+
+      if (restoredCount > 0) {
+        updateFilesList();
+        updateContinueButton();
+        showNotification(`Restored ${restoredCount} exhibit(s) from before Google Drive connect.`, 'success');
+      }
+      if (fileFailCount > 0) {
+        showNotification(`${fileFailCount} file(s) could not be restored — please re-upload them.`, 'warning');
+      }
+    }
+
+    // Clean up sessionStorage
+    sessionStorage.removeItem('exhibitState');
+    sessionStorage.removeItem('urlInputText');
+    sessionStorage.removeItem('formConfig');
+    sessionStorage.removeItem('driveOAuthPending');
+
+  } catch (e) {
+    console.error('Failed to restore state:', e);
+    sessionStorage.removeItem('exhibitState');
+    sessionStorage.removeItem('urlInputText');
+    sessionStorage.removeItem('formConfig');
+    sessionStorage.removeItem('driveOAuthPending');
+  }
+}
+
+/**
+ * Check URL hash for OAuth token on page load (redirect flow callback)
+ * Skip if we're inside a popup — let the parent window read the hash instead.
+ */
+function checkOAuthRedirectReturn() {
+  // If this page was opened as a popup by the parent, don't process the token here.
+  // The parent window will read the hash from the popup via polling.
+  if (window.opener && window.opener !== window) {
+    return false;
+  }
+
+  const hash = window.location.hash;
+  if (!hash || !hash.includes('access_token=')) return false;
+
+  // Parse the token from the URL hash
+  const params = new URLSearchParams(hash.substring(1));
+  const accessToken = params.get('access_token');
+  
+  if (accessToken) {
+    // Clean the URL (remove the token hash)
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    
+    driveState.accessToken = accessToken;
+    console.log('Google Drive token received via redirect flow');
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Handle OAuth2 token response (popup flow)
  */
 function handleOAuthResponse(response) {
   if (response.error) {
@@ -647,26 +944,29 @@ function openGooglePicker() {
   }
 
   const picker = new google.picker.PickerBuilder()
-    // PDF files
+    // All files view (PDFs, images, etc.)
     .addView(
-      new google.picker.DocsView(google.picker.ViewId.DOCS)
+      new google.picker.DocsView()
+        .setIncludeFolders(true)
+        .setSelectFolderEnabled(false)
+        .setLabel('All Files')
+    )
+    // PDF and images only view
+    .addView(
+      new google.picker.DocsView()
         .setMimeTypes('application/pdf,image/jpeg,image/png')
-        .setMode(google.picker.DocsViewMode.LIST)
+        .setIncludeFolders(true)
         .setLabel('PDFs & Images')
     )
     // Google Docs (will be exported as PDF)
     .addView(
       new google.picker.DocsView(google.picker.ViewId.DOCUMENTS)
-        .setLabel('Google Docs (exported as PDF)')
-    )
-    // Google Slides (will be exported as PDF)
-    .addView(
-      new google.picker.DocsView(google.picker.ViewId.PRESENTATIONS)
-        .setLabel('Google Slides (exported as PDF)')
+        .setIncludeFolders(true)
+        .setLabel('Google Docs')
     )
     .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
-    .enableFeature(google.picker.Feature.NAV_HIDDEN)
     .setTitle('Select files to import as exhibits')
+    .setAppId(driveState.appId)
     .setOAuthToken(driveState.accessToken)
     .setDeveloperKey(driveState.apiKey)
     .setCallback(handlePickerResult)

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><title>Connecting to Google Drive...</title></head>
+<body>
+<p id="status" style="font-family:sans-serif;text-align:center;margin-top:40vh;">
+  Connecting to Google Drive...
+</p>
+<script>
+  (function() {
+    var status = document.getElementById('status');
+    var hash = window.location.hash;
+    
+    if (hash && hash.indexOf('access_token=') !== -1) {
+      var params = new URLSearchParams(hash.substring(1));
+      var token = params.get('access_token');
+      
+      if (token) {
+        try {
+          localStorage.setItem('googleDriveToken', token);
+          status.innerHTML = '&#10004; Connected to Google Drive!<br><small style="color:#888;">Google Drive connected successfully. You can now close this window.</small>';
+        } catch(e) {
+          status.textContent = 'Storage error: ' + e.message;
+        }
+        return;
+      }
+    }
+    status.textContent = 'No token received. You can close this window.';
+  })();
+</script>
+</body>
+</html>

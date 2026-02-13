@@ -10,6 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 
 const pdfRoutes = require('./routes/pdf');
+const driveRoutes = require('./routes/driveImport');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,10 +26,26 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
-      scriptSrcAttr: ["'unsafe-inline'"], // Allow inline event handlers (onclick, etc.)
+      scriptSrc: [
+        "'self'",
+        "'unsafe-inline'",
+        "https://cdn.jsdelivr.net",
+        "https://apis.google.com",
+        "https://accounts.google.com",
+      ],
+      scriptSrcAttr: ["'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
+      connectSrc: [
+        "'self'",
+        "https://www.googleapis.com",
+        "https://accounts.google.com",
+      ],
+      frameSrc: [
+        "https://docs.google.com",
+        "https://drive.google.com",
+        "https://accounts.google.com",
+        "https://content.googleapis.com",
+      ],
     },
   },
   crossOriginEmbedderPolicy: false,
@@ -150,6 +167,7 @@ app.get('/health', (req, res) => {
 
 // API routes - Note: multer is handled within pdf routes for specific endpoints
 app.use('/api/pdf', conversionLimiter, pdfRoutes);
+app.use('/api/drive', driveRoutes);
 
 // Serve main page
 app.get('/', (req, res) => {

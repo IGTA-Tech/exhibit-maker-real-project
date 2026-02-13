@@ -1005,3 +1005,15 @@ body {
     gap: 20px;
   }
 }
+/*Access Google Drive*/
+@keyframes driveProgress {
+  0% { width: 0%; }
+  50% { width: 80%; }
+  100% { width: 100%; }
+}
+.drive-section code {
+  background: var(--gray-200);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.82rem;
+}

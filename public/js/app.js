@@ -499,9 +499,375 @@ function extractLabelFromUrl(url) {
   }
 }
 
-// Google Drive placeholder
+// ============================================
+// Google Drive Import (Google Picker API)
+// ============================================
+
+const driveState = {
+  configured: false,
+  clientId: null,
+  apiKey: null,
+  scope: null,
+  accessToken: null,
+  pickerLoaded: false,
+  gisLoaded: false,
+  tokenClient: null,
+};
+
+/**
+ * Check if Google Drive import is configured on the server
+ */
+async function initGoogleDrive() {
+  try {
+    const response = await fetch('/api/drive/config');
+    const config = await response.json();
+
+    if (!config.available) {
+      // Not configured — show setup instructions
+      renderDriveUnavailable(config.message);
+      return;
+    }
+
+    driveState.configured = true;
+    driveState.clientId = config.clientId;
+    driveState.apiKey = config.apiKey;
+    driveState.scope = config.scope;
+
+    // Load the Google API scripts
+    await loadGoogleScripts();
+
+    // Show the "ready to connect" UI
+    renderDriveReady();
+  } catch (error) {
+    console.warn('Google Drive init failed:', error);
+    renderDriveUnavailable('Could not load Google Drive configuration.');
+  }
+}
+
+/**
+ * Load Google Identity Services + Picker API scripts
+ */
+function loadGoogleScripts() {
+  return new Promise((resolve, reject) => {
+    let loaded = 0;
+    const onBothLoaded = () => {
+      loaded++;
+      if (loaded >= 2) resolve();
+    };
+
+    // 1. Google Identity Services (OAuth2)
+    if (!document.getElementById('google-gis-script')) {
+      const gisScript = document.createElement('script');
+      gisScript.id = 'google-gis-script';
+      gisScript.src = 'https://accounts.google.com/gsi/client';
+      gisScript.onload = () => {
+        driveState.gisLoaded = true;
+        onBothLoaded();
+      };
+      gisScript.onerror = () => reject(new Error('Failed to load Google Identity Services'));
+      document.head.appendChild(gisScript);
+    } else {
+      driveState.gisLoaded = true;
+      onBothLoaded();
+    }
+
+    // 2. Google API client (for Picker)
+    if (!document.getElementById('google-api-script')) {
+      const apiScript = document.createElement('script');
+      apiScript.id = 'google-api-script';
+      apiScript.src = 'https://apis.google.com/js/api.js';
+      apiScript.onload = () => {
+        gapi.load('picker', () => {
+          driveState.pickerLoaded = true;
+          onBothLoaded();
+        });
+      };
+      apiScript.onerror = () => reject(new Error('Failed to load Google Picker API'));
+      document.head.appendChild(apiScript);
+    } else {
+      driveState.pickerLoaded = true;
+      onBothLoaded();
+    }
+  });
+}
+
+/**
+ * Main entry point — called when user clicks "Connect Google Drive"
+ */
 function connectGoogleDrive() {
-  showNotification('Google Drive integration coming soon', 'info');
+  if (!driveState.configured) {
+    showNotification('Google Drive is not configured on this server.', 'error');
+    return;
+  }
+
+  if (!driveState.gisLoaded || !driveState.pickerLoaded) {
+    showNotification('Google APIs still loading, please try again...', 'info');
+    return;
+  }
+
+  // Request an access token via OAuth2 popup
+  if (!driveState.tokenClient) {
+    driveState.tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: driveState.clientId,
+      scope: driveState.scope,
+      callback: handleOAuthResponse,
+    });
+  }
+
+  // If we already have a token, open the picker directly
+  if (driveState.accessToken) {
+    openGooglePicker();
+  } else {
+    driveState.tokenClient.requestAccessToken({ prompt: 'consent' });
+  }
+}
+
+/**
+ * Handle OAuth2 token response
+ */
+function handleOAuthResponse(response) {
+  if (response.error) {
+    console.error('OAuth error:', response.error);
+    showNotification('Google Drive authentication failed. Please try again.', 'error');
+    return;
+  }
+
+  driveState.accessToken = response.access_token;
+  renderDriveConnected();
+  openGooglePicker();
+}
+
+/**
+ * Open the Google Picker file chooser
+ */
+function openGooglePicker() {
+  if (!driveState.accessToken) {
+    connectGoogleDrive();
+    return;
+  }
+
+  const picker = new google.picker.PickerBuilder()
+    // PDF files
+    .addView(
+      new google.picker.DocsView(google.picker.ViewId.DOCS)
+        .setMimeTypes('application/pdf,image/jpeg,image/png')
+        .setMode(google.picker.DocsViewMode.LIST)
+        .setLabel('PDFs & Images')
+    )
+    // Google Docs (will be exported as PDF)
+    .addView(
+      new google.picker.DocsView(google.picker.ViewId.DOCUMENTS)
+        .setLabel('Google Docs (exported as PDF)')
+    )
+    // Google Slides (will be exported as PDF)
+    .addView(
+      new google.picker.DocsView(google.picker.ViewId.PRESENTATIONS)
+        .setLabel('Google Slides (exported as PDF)')
+    )
+    .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+    .enableFeature(google.picker.Feature.NAV_HIDDEN)
+    .setTitle('Select files to import as exhibits')
+    .setOAuthToken(driveState.accessToken)
+    .setDeveloperKey(driveState.apiKey)
+    .setCallback(handlePickerResult)
+    .setMaxItems(50)
+    .build();
+
+  picker.setVisible(true);
+}
+
+/**
+ * Handle files selected in the Google Picker
+ */
+async function handlePickerResult(data) {
+  if (data.action !== google.picker.Action.PICKED) {
+    return; // User cancelled
+  }
+
+  const docs = data.docs;
+  if (!docs || docs.length === 0) return;
+
+  // Show import progress
+  renderDriveImporting(docs.length);
+
+  try {
+    // Build file list for the backend
+    const files = docs.map(doc => ({
+      id: doc.id,
+      name: doc.name,
+      mimeType: doc.mimeType,
+      sizeBytes: doc.sizeBytes || 0,
+    }));
+
+    // Send to backend for download
+    const response = await fetch('/api/drive/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accessToken: driveState.accessToken,
+        files,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || 'Import failed');
+    }
+
+    const result = await response.json();
+
+    // Add successful imports to exhibits
+    let addedCount = 0;
+    for (const file of result.files) {
+      if (!file.success) continue;
+
+      // Create a virtual File-like reference for the exhibit
+      // The file is already saved on the server, so we store the path
+      const exhibit = {
+        id: generateId(),
+        type: file.type, // 'pdf' or 'image'
+        file: null,      // No client-side File object
+        url: null,
+        label: file.name.replace(/\.(pdf|jpe?g|png)$/i, ''),
+        filename: file.name,
+        size: file.size,
+        classification: null,
+        confidence: null,
+        // Track that this came from Drive so the backend knows
+        // the file is already on the server
+        driveImport: true,
+        serverPath: file.localPath,
+        serverFilename: file.localFilename,
+        wasConverted: file.wasConverted,
+      };
+
+      state.exhibits.push(exhibit);
+      addedCount++;
+    }
+
+    updateFilesList();
+    updateContinueButton();
+
+    // Show results
+    const failedFiles = result.files.filter(f => !f.success);
+
+    if (addedCount > 0) {
+      showNotification(`Imported ${addedCount} file(s) from Google Drive`, 'success');
+    }
+
+    if (failedFiles.length > 0) {
+      const failNames = failedFiles.map(f => f.name).join(', ');
+      showNotification(`Failed to import: ${failNames}`, 'error');
+    }
+
+    // Restore the connected state UI
+    renderDriveConnected();
+
+  } catch (error) {
+    console.error('Drive import error:', error);
+    showNotification(`Google Drive import failed: ${error.message}`, 'error');
+    renderDriveConnected();
+  }
+}
+
+/**
+ * Disconnect Google Drive (revoke token)
+ */
+function disconnectGoogleDrive() {
+  if (driveState.accessToken) {
+    google.accounts.oauth2.revoke(driveState.accessToken, () => {
+      console.log('Google Drive token revoked');
+    });
+  }
+  driveState.accessToken = null;
+  driveState.tokenClient = null;
+  renderDriveReady();
+  showNotification('Disconnected from Google Drive', 'info');
+}
+
+// ============================================
+// Drive UI State Renderers
+// ============================================
+
+function renderDriveUnavailable(message) {
+  const container = document.getElementById('upload-drive');
+  container.innerHTML = `
+    <div class="drive-section">
+      <div class="drive-placeholder">
+        <span class="drive-icon">📁</span>
+        <h3>Google Drive Import</h3>
+        <p style="color: var(--gray-500); max-width: 400px; margin: 0 auto 15px;">
+          ${escapeHtml(message || 'Not configured')}
+        </p>
+        <div style="background: var(--gray-50); border-radius: 8px; padding: 15px; text-align: left; max-width: 480px; margin: 0 auto; font-size: 0.85rem; color: var(--gray-600);">
+          <strong>Setup instructions:</strong><br>
+          1. Create a project at <a href="https://console.cloud.google.com" target="_blank">Google Cloud Console</a><br>
+          2. Enable <em>Google Drive API</em> and <em>Google Picker API</em><br>
+          3. Create an <em>OAuth 2.0 Client ID</em> (Web application)<br>
+          4. Create an <em>API Key</em> (restrict to Picker API)<br>
+          5. Set <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_API_KEY</code> in your <code>.env</code>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDriveReady() {
+  const container = document.getElementById('upload-drive');
+  container.innerHTML = `
+    <div class="drive-section">
+      <div class="drive-placeholder">
+        <span class="drive-icon">📁</span>
+        <h3>Google Drive Import</h3>
+        <p>Browse your Google Drive and select PDFs, images, or Google Docs to import as exhibits.</p>
+        <button type="button" class="btn btn-primary btn-large" onclick="connectGoogleDrive()">
+          <span>🔗</span> Connect & Browse Google Drive
+        </button>
+        <p style="font-size: 0.8rem; color: var(--gray-400); margin-top: 12px;">
+          Supports PDF, JPEG, PNG files and Google Docs/Slides (exported as PDF)
+        </p>
+      </div>
+    </div>
+  `;
+}
+
+function renderDriveConnected() {
+  const container = document.getElementById('upload-drive');
+  container.innerHTML = `
+    <div class="drive-section" style="padding: 30px;">
+      <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 20px;">
+        <span style="color: var(--success); font-size: 1.2rem;">✓</span>
+        <span style="color: var(--success); font-weight: 600;">Connected to Google Drive</span>
+      </div>
+      <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+        <button type="button" class="btn btn-primary" onclick="openGooglePicker()">
+          <span>📂</span> Browse & Select Files
+        </button>
+        <button type="button" class="btn btn-secondary btn-small" onclick="disconnectGoogleDrive()">
+          Disconnect
+        </button>
+      </div>
+      <p style="font-size: 0.8rem; color: var(--gray-400); margin-top: 15px; text-align: center;">
+        Select multiple files — PDFs, images, and Google Docs are supported
+      </p>
+    </div>
+  `;
+}
+
+function renderDriveImporting(count) {
+  const container = document.getElementById('upload-drive');
+  container.innerHTML = `
+    <div class="drive-section" style="padding: 40px;">
+      <div style="text-align: center;">
+        <div style="font-size: 2.5rem; margin-bottom: 15px;">⏳</div>
+        <h3 style="margin-bottom: 8px;">Importing ${count} file(s)...</h3>
+        <p style="color: var(--gray-500);">Downloading from Google Drive. This may take a moment for large files.</p>
+        <div style="margin-top: 20px; width: 200px; height: 4px; background: var(--gray-200); border-radius: 2px; margin-left: auto; margin-right: auto; overflow: hidden;">
+          <div style="height: 100%; background: var(--primary); border-radius: 2px; animation: driveProgress 2s ease-in-out infinite;"></div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 // Update files list UI
@@ -929,13 +1295,15 @@ async function generatePackage() {
       label: exhibit.label,
       filename: exhibit.filename,
       classification: exhibit.classification,
-      order: index
+      order: index,
+      // For Drive-imported files already on the server
+      serverFilename: exhibit.serverFilename || null,
     }));
     formData.append('exhibits', JSON.stringify(exhibitsData));
 
-    // Add files (both PDFs and images)
+    // Add files (both PDFs and images) — skip Drive imports (already on server)
     state.exhibits.forEach(exhibit => {
-      if ((exhibit.type === 'pdf' || exhibit.type === 'image') && exhibit.file) {
+      if ((exhibit.type === 'pdf' || exhibit.type === 'image') && exhibit.file && !exhibit.driveImport) {
         formData.append('files', exhibit.file, exhibit.id + getFileExtension(exhibit.filename));
       }
     });
@@ -1192,4 +1560,5 @@ document.addEventListener('DOMContentLoaded', () => {
   updateFilesList();
   updateContinueButton();
   checkServiceConfig();
+  initGoogleDrive();
 });
